@@ -66,12 +66,24 @@ export interface DelegationPolicy extends DelegationConfig {
   readonly truncationMessage: string;
 }
 
+export type DelegationStatus = "running" | "done" | "cancelled" | "failed";
+
+/** Thrown when a delegated run is stopped through its AbortSignal rather than failing on its own. */
+export class DelegationAbortError extends Error {
+  constructor() {
+    super("Cancelled");
+    this.name = "DelegationAbortError";
+  }
+}
+
 export interface DelegationDetails {
   task: string;
   model: string;
   thinking: string;
   prompt: string;
-  status: "running" | "done";
+  status: DelegationStatus;
+  /** Set when the run ended in "cancelled" or "failed"; shown next to the status label. */
+  error?: string;
   activities: string[];
   output: string;
   elapsedMs: number;
@@ -243,7 +255,7 @@ export function runProcess(
       if (forceKillTimer) clearTimeout(forceKillTimer);
       options.signal?.removeEventListener("abort", onAbort);
       if (stopped === "timeout") reject(new Error(`Timed out after ${options.timeoutMs / 60_000} minutes`));
-      else if (stopped === "aborted") reject(new Error("Delegated task aborted"));
+      else if (stopped === "aborted") reject(new DelegationAbortError());
       else resolve({ stdout, stderr, code: code ?? 1 });
     });
   });

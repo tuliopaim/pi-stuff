@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   applyDelegationEvent,
   createDelegationDetails,
+  DelegationAbortError,
   getActiveSubagentPresetName,
   getDelegationConfig,
   runProcess,
@@ -77,7 +78,7 @@ test("runProcess propagates external abort", async () => {
   setTimeout(() => controller.abort(), 50);
   await assert.rejects(
     runProcess(process.execPath, sleeper, { cwd: process.cwd(), timeoutMs: 5_000, signal: controller.signal }),
-    /aborted/,
+    DelegationAbortError,
   );
 });
 

@@ -35,7 +35,7 @@ Model choices live in `agent/settings.json`. Switch the active set for the curre
 /subagent-preset openai
 ```
 
-The `/commit` command is a convenient front end for the same isolated commit agent. It only runs when explicitly requested. While running it streams the agent's activity in a live widget above the editor, and the finished run is recorded in the transcript with the same block used for `commit` tool calls.
+The `/commit` command is a convenient front end for the same isolated commit agent. It only runs when explicitly requested. It reuses the tool-call presentation: a padded box that is gray while running and turns green on success or red on failure, streamed live above the editor and then recorded in the transcript. Press `Esc` while it runs to cancel; the cancelled run is kept in the transcript rather than discarded.
 
 ## Interactive questions
 

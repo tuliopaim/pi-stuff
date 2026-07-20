@@ -1,8 +1,11 @@
 import { getMarkdownTheme, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
-import type { DelegationConfig, DelegationDetails } from "./runtime.ts";
+import { Box, Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
+import type { DelegationConfig, DelegationDetails, DelegationStatus } from "./runtime.ts";
 
 type Theme = ExtensionContext["ui"]["theme"];
+
+/** The subset of a policy the call header needs, so finished runs can re-render from details alone. */
+type DelegationCallInfo = Pick<DelegationConfig, "name" | "model" | "thinking" | "prompt">;
 
 function formatNumber(value: number) {
   if (value < 1_000) return String(value);
@@ -19,29 +22,43 @@ function usageLine(details: DelegationDetails) {
   return parts.join(" · ");
 }
 
-export function renderDelegationCall(config: DelegationConfig, task: string, expanded: boolean, theme: Theme) {
+/** Mirrors the tool-execution shell: pending while running, success/error once settled. */
+function statusBg(status: DelegationStatus, theme: Theme) {
+  if (status === "running") return (text: string) => theme.bg("toolPendingBg", text);
+  if (status === "done") return (text: string) => theme.bg("toolSuccessBg", text);
+  return (text: string) => theme.bg("toolErrorBg", text);
+}
+
+export function renderDelegationCall(config: DelegationCallInfo, task: string, expanded: boolean, theme: Theme) {
   let text = `${theme.fg("toolTitle", theme.bold(`${config.name} `))}${theme.fg("accent", `${config.model}:${config.thinking}`)}\n${theme.fg("dim", task)}`;
   if (expanded) text += `\n\n${theme.fg("muted", "Agent instructions:")}\n${theme.fg("dim", config.prompt)}`;
   return new Text(text, 0, 0);
 }
 
-/** Render a command-launched delegation with the same header + result block as a tool call. */
+/**
+ * Render a command-launched delegation inside the same padded, status-colored box the
+ * interactive tool shell builds, so `/commit` is visually indistinguishable from a `commit` tool call.
+ */
 export function renderDelegationMessage(name: string, details: DelegationDetails, expanded: boolean, theme: Theme) {
-  const container = new Container();
-  const header = `${theme.fg("toolTitle", theme.bold(`${name} `))}${theme.fg("accent", `${details.model}:${details.thinking}`)}\n${theme.fg("dim", details.task)}`;
-  container.addChild(new Text(header, 0, 0));
-  container.addChild(new Spacer(1));
-  container.addChild(renderDelegationResult(details, expanded, theme));
-  return container;
+  const box = new Box(1, 1, statusBg(details.status, theme));
+  box.addChild(renderDelegationCall({ name, ...details }, details.task, expanded, theme));
+  box.addChild(renderDelegationResult(details, expanded, theme));
+  return box;
 }
 
 export function renderDelegationResult(details: DelegationDetails | undefined, expanded: boolean, theme: Theme) {
   if (!details) return new Text(theme.fg("muted", "(no delegation details)"), 0, 0);
-  const icon = details.status === "done" ? theme.fg("success", "✓") : theme.fg("warning", "⏳");
+  const icon = details.status === "done"
+    ? theme.fg("success", "✓")
+    : details.status === "running"
+      ? theme.fg("warning", "⏳")
+      : theme.fg("error", "✗");
+  const label = details.status === "done" ? "completed" : details.status === "running" ? "running" : details.status;
   const recent = expanded ? details.activities : details.activities.slice(-6);
 
   if (!expanded) {
-    let text = `${icon} ${theme.fg("toolTitle", theme.bold(details.status === "done" ? "completed" : "running"))}`;
+    let text = `${icon} ${theme.fg("toolTitle", theme.bold(label))}`;
+    if (details.error) text += ` ${theme.fg("error", details.error)}`;
     for (const activity of recent) text += `\n${theme.fg("muted", "→ ")}${theme.fg("toolOutput", activity)}`;
     if (details.output) text += `\n${theme.fg("dim", details.output.split("\n").slice(-3).join("\n"))}`;
     text += `\n${theme.fg("dim", usageLine(details))}`;
@@ -49,7 +66,11 @@ export function renderDelegationResult(details: DelegationDetails | undefined, e
   }
 
   const container = new Container();
-  container.addChild(new Text(`${icon} ${theme.fg("toolTitle", theme.bold(details.status))}`, 0, 0));
+  container.addChild(new Text(
+    `${icon} ${theme.fg("toolTitle", theme.bold(label))}${details.error ? ` ${theme.fg("error", details.error)}` : ""}`,
+    0,
+    0,
+  ));
   container.addChild(new Spacer(1));
   container.addChild(new Text(theme.fg("muted", "── Task ──"), 0, 0));
   container.addChild(new Text(details.task, 0, 0));

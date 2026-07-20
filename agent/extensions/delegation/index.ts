@@ -2,9 +2,13 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { renderDelegationMessage } from "./render.ts";
 import {
+  createDelegationDetails,
+  DelegationAbortError,
   getActiveSubagentPresetName,
+  getDelegationConfig,
   getSubagentPresetNames,
   registerDelegatedTool,
   setSubagentPreset,
@@ -149,15 +153,41 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       const task = args.trim() || "Analyze all completed work and create the appropriate commit or commits.";
-      ctx.ui.setStatus("commit", "commit agent running");
+      const controller = new AbortController();
+      let latest: DelegationDetails | undefined;
+
+      const showWidget = (details: DelegationDetails) => {
+        latest = details;
+        ctx.ui.setWidget("commit", (_tui, theme) => renderDelegationMessage("Commit", details, false, theme));
+      };
+      // The command path gets no harness-supplied signal, so escape is wired up by hand.
+      const stopListening = ctx.ui.onTerminalInput?.((data) => {
+        if (!matchesKey(data, Key.escape)) return undefined;
+        controller.abort();
+        return { consume: true };
+      });
+
+      ctx.ui.setStatus("commit", "commit agent running · esc to cancel");
       try {
-        const details = await runCommit(task, ctx.cwd, undefined, (details) => {
-          ctx.ui.setWidget("commit", (_tui, theme) => renderDelegationMessage("Commit", details, false, theme));
-        });
+        const details = await runCommit(task, ctx.cwd, controller.signal, showWidget);
         pi.sendMessage({ customType: "commit-result", content: details.output, display: true, details });
       } catch (error) {
-        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+        const cancelled = error instanceof DelegationAbortError;
+        const message = error instanceof Error ? error.message : String(error);
+        const details: DelegationDetails = {
+          ...(latest ?? createDelegationDetails(getDelegationConfig(COMMIT.key, COMMIT), task)),
+          status: cancelled ? "cancelled" : "failed",
+          error: message,
+        };
+        pi.sendMessage({
+          customType: "commit-result",
+          content: details.output || `Commit agent ${cancelled ? "cancelled" : "failed"}: ${message}`,
+          display: true,
+          details,
+        });
+        if (!cancelled) ctx.ui.notify(message, "error");
       } finally {
+        stopListening?.();
         ctx.ui.setWidget("commit", undefined);
         ctx.ui.setStatus("commit", undefined);
       }
