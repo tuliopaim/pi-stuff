@@ -167,7 +167,6 @@ export default function (pi: ExtensionAPI) {
         return { consume: true };
       });
 
-      ctx.ui.setStatus("commit", "commit agent running · esc to cancel");
       try {
         const details = await runCommit(task, ctx.cwd, controller.signal, showWidget);
         pi.sendMessage({ customType: "commit-result", content: details.output, display: true, details });
@@ -189,7 +188,6 @@ export default function (pi: ExtensionAPI) {
       } finally {
         stopListening?.();
         ctx.ui.setWidget("commit", undefined);
-        ctx.ui.setStatus("commit", undefined);
       }
     },
   });

@@ -26,7 +26,6 @@ test("registers delegation adapters and executes tools through their policies", 
   const events = new Map<string, any>();
   const messageRenderers = new Map<string, any>();
   const messages: any[] = [];
-  const statuses: any[] = [];
   const widgets: any[] = [];
 
   writeFileSync(executable, `#!/usr/bin/env node
@@ -100,7 +99,6 @@ console.log(JSON.stringify({ type: "agent_settled" }));
       isIdle: () => true,
       ui: {
         notify() {},
-        setStatus: (...args: any[]) => statuses.push(args),
         setWidget: (key: string, content: any) => widgets.push([key, content]),
         onTerminalInput: () => () => {},
       },
@@ -109,8 +107,6 @@ console.log(JSON.stringify({ type: "agent_settled" }));
     assert.equal(messages[0].customType, "commit-result");
     assert.equal(messages[0].display, true);
     assert.equal(messages[0].details.status, "done");
-    assert.deepEqual(statuses.at(0), ["commit", "commit agent running · esc to cancel"]);
-    assert.deepEqual(statuses.at(-1), ["commit", undefined]);
     assert.ok(widgets.length >= 2);
     assert.equal(typeof widgets.at(0)[1], "function");
     assert.deepEqual(widgets.at(-1), ["commit", undefined]);
@@ -176,7 +172,6 @@ setTimeout(() => {}, 60000);
       isIdle: () => true,
       ui: {
         notify() {},
-        setStatus() {},
         setWidget: (key: string, content: any) => widgets.push([key, content]),
         onTerminalInput: (handler: any) => {
           inputHandler = handler;
