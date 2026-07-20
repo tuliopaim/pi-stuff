@@ -17,8 +17,10 @@ test("registers delegation adapters and executes tools through their policies", 
   const tools = new Map<string, any>();
   const commands = new Map<string, any>();
   const events = new Map<string, any>();
+  const messageRenderers = new Map<string, any>();
   const messages: any[] = [];
   const statuses: any[] = [];
+  const widgets: any[] = [];
 
   writeFileSync(executable, `#!/usr/bin/env node
 const fs = require("node:fs");
@@ -51,12 +53,14 @@ console.log(JSON.stringify({ type: "agent_settled" }));
     registerDelegation({
       registerTool(tool: any) { tools.set(tool.name, tool); },
       registerCommand(name: string, command: any) { commands.set(name, command); },
+      registerMessageRenderer(customType: string, renderer: any) { messageRenderers.set(customType, renderer); },
       on(name: string, handler: any) { events.set(name, handler); },
       sendMessage(message: any) { messages.push(message); },
     } as any);
 
     assert.deepEqual([...tools.keys()], ["scout", "review", "commit"]);
     assert.deepEqual([...commands.keys()], ["commit", "subagent-preset"]);
+    assert.ok(messageRenderers.has("commit-result"));
     assert.ok(events.has("session_start"));
 
     const updates: any[] = [];
@@ -90,13 +94,22 @@ console.log(JSON.stringify({ type: "agent_settled" }));
       ui: {
         notify() {},
         setStatus: (...args: any[]) => statuses.push(args),
+        setWidget: (key: string, content: any) => widgets.push([key, content]),
       },
     });
     assert.equal(messages.length, 1);
     assert.equal(messages[0].customType, "commit-result");
     assert.equal(messages[0].display, true);
+    assert.equal(messages[0].details.status, "done");
     assert.deepEqual(statuses.at(0), ["commit", "commit agent running"]);
     assert.deepEqual(statuses.at(-1), ["commit", undefined]);
+    assert.ok(widgets.length >= 2);
+    assert.equal(typeof widgets.at(0)[1], "function");
+    assert.deepEqual(widgets.at(-1), ["commit", undefined]);
+
+    const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+    assert.ok(messageRenderers.get("commit-result")(messages[0], { expanded: false }, theme));
+    assert.equal(messageRenderers.get("commit-result")({ details: undefined }, { expanded: false }, theme), undefined);
 
     const calls = readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
     assert.deepEqual(calls.map((args) => args[args.indexOf("--model") + 1]), [

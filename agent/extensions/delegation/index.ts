@@ -2,11 +2,13 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { renderDelegationMessage } from "./render.ts";
 import {
   getActiveSubagentPresetName,
   getSubagentPresetNames,
   registerDelegatedTool,
   setSubagentPreset,
+  type DelegationDetails,
   type DelegationPolicy,
 } from "./runtime.ts";
 
@@ -135,6 +137,10 @@ export default function (pi: ExtensionAPI) {
   registerDelegatedTool(pi, REVIEW);
   const runCommit = registerDelegatedTool(pi, COMMIT);
 
+  pi.registerMessageRenderer<DelegationDetails>("commit-result", (message, { expanded }, theme) =>
+    message.details ? renderDelegationMessage("Commit", message.details, expanded, theme) : undefined,
+  );
+
   pi.registerCommand("commit", {
     description: "Create intentional commits with the isolated commit agent",
     handler: async (args, ctx) => {
@@ -146,12 +152,13 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.setStatus("commit", "commit agent running");
       try {
         const details = await runCommit(task, ctx.cwd, undefined, (details) => {
-          ctx.ui.setStatus("commit", details.activities.at(-1) || "commit agent running");
+          ctx.ui.setWidget("commit", (_tui, theme) => renderDelegationMessage("Commit", details, false, theme));
         });
         pi.sendMessage({ customType: "commit-result", content: details.output, display: true, details });
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
       } finally {
+        ctx.ui.setWidget("commit", undefined);
         ctx.ui.setStatus("commit", undefined);
       }
     },

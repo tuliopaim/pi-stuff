@@ -25,6 +25,16 @@ export function renderDelegationCall(config: DelegationConfig, task: string, exp
   return new Text(text, 0, 0);
 }
 
+/** Render a command-launched delegation with the same header + result block as a tool call. */
+export function renderDelegationMessage(name: string, details: DelegationDetails, expanded: boolean, theme: Theme) {
+  const container = new Container();
+  const header = `${theme.fg("toolTitle", theme.bold(`${name} `))}${theme.fg("accent", `${details.model}:${details.thinking}`)}\n${theme.fg("dim", details.task)}`;
+  container.addChild(new Text(header, 0, 0));
+  container.addChild(new Spacer(1));
+  container.addChild(renderDelegationResult(details, expanded, theme));
+  return container;
+}
+
 export function renderDelegationResult(details: DelegationDetails | undefined, expanded: boolean, theme: Theme) {
   if (!details) return new Text(theme.fg("muted", "(no delegation details)"), 0, 0);
   const icon = details.status === "done" ? theme.fg("success", "✓") : theme.fg("warning", "⏳");
