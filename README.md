@@ -1,110 +1,176 @@
-# Pi local workflows
+# My Pi setup
+
+An opinionated [Pi](https://github.com/badlogic/pi-mono) configuration for day-to-day coding: focused subagents, multi-agent workflows, interactive questions, a useful status footer, reusable prompts and skills, and editor-assisted review.
+
+Inspired by [Ben Davis's Pi setup](https://github.com/davis7dotsh/my-pi-setup), then adapted around my own models, dotfiles, and review workflow.
+
+## What it adds
+
+- **Focused subagents** for codebase reconnaissance, independent review, and intentional commits
+- **Multi-agent workflows** for larger tasks that benefit from parallel or phased work
+- **Interactive questions** with multiple-choice and free-form answers
+- **A two-line footer** showing model, context usage, cost, generation speed, branch, and changed files
+- **Fresh-context plan execution** with `/implement-plan`
+- **Reusable prompts and skills**, including `/orchestrate`
+- **Web research tools** through `pi-web-access`
+- **Simplicity-focused coding guidance** through `ponytail`
+
+## Subagents
+
+Most delegated work does not need a workflow. Three tools run focused jobs in isolated child processes:
+
+| Tool | Purpose | Access |
+|---|---|---|
+| `scout` | Trace code, locate relevant files, and answer a narrow reconnaissance question | Read-only |
+| `review` | Review a change from a fresh context and report correctness, security, or regression risks | Read-only |
+| `commit` | Inspect completed work, stage only the intended files, and create one or more commits | Git write access |
+
+Each tool has its own model, reasoning level, timeout, prompt, and output limit, while sharing the same subprocess lifecycle and activity UI. Child agents cannot recursively delegate.
+
+Model choices live in `agent/settings.json`. Switch the active set for the current session with:
+
+```text
+/subagent-preset
+/subagent-preset opencode-go
+/subagent-preset openai
+```
+
+The `/commit` command is a convenient front end for the same isolated commit agent. It only runs when explicitly requested. While running it streams the agent's activity in a live widget above the editor, and the finished run is recorded in the transcript with the same block used for `commit` tool calls.
+
+## Interactive questions
+
+The `ask_user` tool lets the model pause and ask one question with 2–5 likely answers. The widget supports:
+
+- arrow keys or number keys to select an option
+- an optional description below each answer
+- **Write my own answer…** for free-form input
+- `Esc` to go back or dismiss
+
+This avoids ambiguous prose exchanges when the real decision can be presented clearly as a small set of choices.
+
+## Bottom widget
+
+`agent/extensions/context-tokens-footer.ts` replaces Pi's footer with a compact two-line dashboard:
+
+```text
+~/dev/project                         provider/model · reasoning
+34% 68k/200k · $0.42 · 71 tok/s       main · 3 files changed
+```
+
+It updates during generation and shows:
+
+- current directory and selected model
+- context tokens and percentage used
+- accumulated session cost
+- output tokens per second
+- Git branch and changed-file count
+- status messages published by extensions, such as running subagents or workflows
 
 ## Multi-agent workflows
 
-Use the `workflow` tool for substantial tasks that benefit from parallel research, phased implementation, or independent synthesis. Keep focused one-off work in the existing tools:
+The `workflow` tool is for substantial tasks that need parallel research, phased implementation, or independent synthesis. It runs a task-specific JavaScript orchestration script with four primitives:
 
-- `scout` — locate and understand code
-- `review` — independently review completed changes
-- `commit` — create requested commits
-- `workflow` — coordinate several isolated agents
+- `phase(title)` — updates the visible phase
+- `agent(prompt, options)` — starts one isolated agent
+- `parallel([...])` — runs independent agents concurrently
+- `args` — receives input supplied to the workflow
 
-Workflow children cannot invoke those delegation tools or recursively start workflows. Every `agent()` call must explicitly select a `provider/model-id` and reasoning `effort`; missing either fails before contacting a provider.
+Workflows are sandboxed, capped at four concurrent agents and 32 agent calls, and persist artifacts under `~/.pi/agent/workflows/<runId>/`. They can run in the foreground or background. `/workflows` opens the dashboard for active and completed runs.
 
-### Model routing
+Every child selects its model and reasoning effort explicitly. The intended routing is:
 
-| Role | Model | Effort | Benefit | Trade-off |
-|---|---|---|---|---|
-| Reconnaissance, code tracing, test discovery | `opencode-go/deepseek-v4-flash` | `medium` | Large context for cheap bulk reading | Not the default for delicate edits |
-| Implementation and integration | `opencode-go/kimi-k2.7-code` | `high` | Code-focused without OpenAI quota usage | Smaller 262K context |
-| Planning and synthesis | `openai-codex/gpt-5.6-sol` | `high` | Strong judgment over compact findings | Scarce weekly quota |
-| Consequential adversarial/final review | `openai-codex/gpt-5.6-sol` | `high` | Best reserved for correctness decisions | Scarce weekly quota |
-| Routine verification and report formatting | `opencode-go/deepseek-v4-flash` | `medium` or `low` | Cheap and sufficient | Less useful for ambiguous design decisions |
+- `opencode-go/deepseek-v4-flash` for reconnaissance and routine checks
+- `opencode-go/kimi-k2.7-code` for implementation and integration
+- `openai-codex/gpt-5.6-sol` for planning or consequential final review
 
-Other enabled alternatives are `opencode-go/minimax-m3` for experiments and `openai-codex/gpt-5.6-terra` for strong implementation when OpenAI quota is intentionally available. Do not use Sol for reconnaissance or routine implementation. Keep reconnaissance outputs bounded so premium agents consume findings rather than raw transcripts.
+Required child failures stop dependent phases rather than silently feeding them incomplete results. Schema-bound results are available when later phases need structured data.
 
-When a schema-bound agent returns prose without `structured_output`, the runner asks it once, in the same session, to submit its existing findings correctly. Agents are required by default: one failure mechanically blocks all later agents and fails the workflow. The parent orchestrator then inspects the error and decides whether to retry, narrow/split the assignment, or change models; workflows do not blindly retry failures or unchanged timeouts. Use `optional: true` only for planned best-effort read-only work whose absence cannot affect later phases.
+### `/orchestrate`: plan, approve, implement
 
-```js
-const scan = await agent(prompt, {
-  label: 'event-flow',
-  phase: 'Reconnaissance',
-  model: 'opencode-go/deepseek-v4-flash',
-  effort: 'medium',
-  schema: TRACE,
-})
-```
-
-### Orchestrated task with plan approval
-
-Start the reusable recipe with:
+For a substantial implementation:
 
 ```text
 /orchestrate Add organization-level API tokens
 ```
 
-The planning workflow runs parallel reconnaissance, creates a plan, reviews it adversarially, and then stops without editing. Review or refine the returned plan in the parent conversation:
-
-```text
-Keep the migration backward-compatible and put the API tests in the existing token suite.
-```
-
-When satisfied, explicitly approve it:
+The first workflow researches the codebase, builds a plan, reviews it, and stops before editing. Refine the plan in the parent conversation, then continue explicitly:
 
 ```text
 Approved, continue.
 ```
 
-A new workflow implements the approved plan, integrates the agents' changes, and verifies the result. This is intentionally two workflow runs: the parent conversation is the human checkpoint, so no paused child or resume protocol is required.
+A second workflow implements and verifies the approved plan. The split is intentional: the conversation is the human review checkpoint, and nothing commits automatically.
 
-Use `/skill:orchestrated-task <task>` as the direct alternative to `/orchestrate`, and `/workflows` to inspect active and completed runs. Nothing commits automatically.
+Use `/skill:orchestrated-task <task>` as the direct alternative. For other large jobs, ask Pi to “use a workflow” and it will generate one for that task.
 
-For other large tasks, ask Pi to “use a workflow” or “orchestrate this.” Pi generates a task-specific script rather than selecting a fixed pipeline. Parallel implementation is allowed only when agents own disjoint files.
+## Plans, prompts, and skills
 
-### Setup and checks
+### Fresh-context plan execution
 
-After cloning the dotfiles, install the workflow dependencies:
+`/implement-plan <path>` reads a Markdown plan, asks for confirmation, and starts a fresh Pi session containing only the plan and repository files. If no path is supplied, it checks common names such as `plans/PLAN.md` and `plan.md`.
+
+```text
+/implement-plan plans/PLAN.md
+```
+
+### Shared prompts and skills
+
+`agent/settings.json` loads:
+
+- prompts from `~/dotfiles/pi/agent/prompts`
+- personal skills from `~/dotfiles/skills`
+- all local extensions from `~/dotfiles/pi/agent/extensions`
+
+The included prompt templates expose commands such as `/orchestrate`. Installed packages add `pi-web-access` for web search/content retrieval and `ponytail` for deliberately minimal, YAGNI-oriented implementation.
+
+## Shared extension structure
+
+The implementation is split by responsibility instead of placing everything in one extension:
+
+```text
+agent/
+├── settings.json                 # models, packages, skills, prompts, extensions
+├── extensions/
+│   ├── delegation/               # scout, review, commit, and model presets
+│   ├── workflows/                # sandbox, runner, dashboard, and artifacts
+│   ├── shared/                   # child sessions, trust, timeouts, context, status
+│   ├── ask-user.ts               # interactive question tool
+│   ├── context-tokens-footer.ts  # bottom dashboard
+│   └── implement-plan.ts         # fresh-context plan command
+└── prompts/                      # reusable slash-command prompts
+```
+
+The shared child-session layer gives workflow children the normal global/package resources while preventing recursive delegation and respecting Pi's project trust decisions. Shared helpers also keep context reporting, activity text, and tool-call deadlines consistent.
+
+## Setup
+
+This repository expects to live at `~/dotfiles`, because the Pi settings reference paths under that directory.
+
+Install the local extension dependencies:
 
 ```sh
 npm install --prefix ~/dotfiles/pi/agent
 ```
 
-Apply the Home Manager configuration and run `/reload` in Pi after configuration changes.
+Link the settings file manually:
 
-Run the full workflow, delegation, and prompt checks with:
+```sh
+mkdir -p ~/.pi/agent
+ln -s ~/dotfiles/pi/agent/settings.json ~/.pi/agent/settings.json
+```
+
+Alternatively, the repository's Home Manager configuration or `symlinks.sh` creates that link. Apply Home Manager after configuration changes, then run `/reload` in Pi.
+
+## Checks
+
+Run all extension and prompt tests:
 
 ```sh
 npm test --prefix ~/dotfiles/pi/agent
 ```
 
-Run only the workflow checks with `npm run --prefix ~/dotfiles/pi/agent test:workflows`.
+Run only workflow tests:
 
-## Code review
-
-Code review of agent-produced changes lives outside Pi now. See:
-
-- Neovim plugin: `agent-review.nvim` (`~/dev/personal/agent-review.nvim`, wired in via `nvim/lua/plugins/agent-review.lua`)
-- Agent skill: `skills/review-comments/SKILL.md`
-
-Workflow:
-
-1. In any git repo, open Neovim. Two entry points:
-   - `:ReviewStart` (or `<leader>rR`) — opens Diffview for the working tree. Accepts Diffview args, e.g. `:ReviewStart origin/main...HEAD`.
-   - `<leader>rc` in any normal buffer under the repo — bootstraps a review session and opens the comment dialog on the current line, no Diffview needed.
-2. Leave inline comments with `<leader>rc`. Save/quit with `<leader>rq`. Comments are written to `<repo>/.review/comments.json` (auto-added to `.git/info/exclude`).
-3. Back in any agent (Pi, Claude Code, Codex), say "process my review comments" — the `review-comments` skill walks through each unresolved entry.
-
-### Neovim keymaps
-
-`<leader>rc` works globally in any buffer whose file lives under the repo root, and inside Diffview review buffers. The rest become available once a buffer is attached (Diffview opens, or `<leader>rc` is pressed in a regular buffer):
-
-- `<leader>rc` — add/edit a multiline comment on the current line. `<C-s>` saves, `q` cancels.
-- `<leader>rd` — delete the comment on the current line.
-- `<leader>rx` — toggle resolved/unresolved.
-- `<leader>rs` — save now.
-- `<leader>rq` — save and quit.
-- `<leader>rn` / `<leader>rp` — next / previous comment in this buffer.
-- `<leader>rr` — refresh (close + reopen Diffview, reload comments from disk).
-- `<leader>rR` — start (or restart) the Diffview review. Prompts before clearing if a session is active.
-
-Caveats for commenting from a plain buffer (not Diffview): comments always anchor to `side: "new"`, so you can't comment on a deleted line that way; and the line number you pick reflects the buffer's current state, so if you have unsaved edits, the agent may see a slightly different line by the time it reads `comments.json`. Use Diffview when either matters.
+```sh
+npm run --prefix ~/dotfiles/pi/agent test:workflows
+```
