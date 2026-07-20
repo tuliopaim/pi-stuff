@@ -1,6 +1,3 @@
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { renderDelegationMessage } from "./render.ts";
@@ -15,11 +12,6 @@ import {
   type DelegationDetails,
   type DelegationPolicy,
 } from "./runtime.ts";
-
-const workflow = readFileSync(
-  resolve(homedir(), "dotfiles/skills/commit-work/SKILL.md"),
-  "utf8",
-);
 
 const SCOUT: DelegationPolicy = {
   key: "scout",
@@ -121,6 +113,7 @@ const COMMIT: DelegationPolicy = {
   thinking: "medium",
   timeoutMs: 15 * 60_000,
   tools: "read,grep,find,ls,bash",
+  skills: ["~/dotfiles/skills/commit-work"],
   description: "Delegate completed-work analysis and intentional git commits to a specialized model.",
   snippet: "Delegate git commit creation to an isolated specialized child",
   guidelines: [
@@ -129,7 +122,7 @@ const COMMIT: DelegationPolicy = {
     "Do not inspect, stage, or commit in the parent; the isolated commit agent owns the complete workflow.",
   ],
   parameter: "Optional commit scope, ticket context, or commit-splitting instructions",
-  prompt: `You are an isolated git commit agent. Follow the injected commit-work workflow exactly. Inspect all changes before staging, keep unrelated work uncommitted, never expose secrets, never amend or force push, and report each created commit's SHA and message.\n\n${workflow}`,
+  prompt: "You are an isolated git commit agent. Use the commit-work skill and follow it exactly. Inspect all changes before staging, keep unrelated work uncommitted, never expose secrets, never amend or force push, and report each created commit's SHA and message.",
   maxLines: 200,
   maxBytes: 24 * 1024,
   emptyOutput: "(commit agent returned no output)",

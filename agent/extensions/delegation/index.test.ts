@@ -92,7 +92,7 @@ console.log(JSON.stringify({ type: "agent_settled" }));
     assert.equal(results.get("review").details.truncated, false);
     assert.equal(results.get("commit").details.model, "test/commit");
     assert.equal(results.get("commit").details.truncated, true);
-    assert.match(results.get("commit").details.prompt, /# Commit Work/);
+    assert.match(results.get("commit").details.prompt, /Use the commit-work skill/);
 
     await commands.get("commit").handler("command task", {
       cwd: process.cwd(),
@@ -124,6 +124,11 @@ console.log(JSON.stringify({ type: "agent_settled" }));
       "read,grep,find,ls,bash",
       "read,grep,find,ls,bash",
     ]);
+    assert.deepEqual(calls.map((args) => {
+      const index = args.indexOf("--skill");
+      return index === -1 ? undefined : args[index + 1];
+    }), [undefined, undefined, "~/dotfiles/skills/commit-work", "~/dotfiles/skills/commit-work"]);
+    assert.ok(calls.every((args) => args.includes("--no-skills")));
   } finally {
     setSubagentPreset(undefined);
     if (previousPath === undefined) delete process.env.PATH;

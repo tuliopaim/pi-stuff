@@ -51,6 +51,7 @@ export interface DelegationConfig {
   readonly thinking: string;
   readonly timeoutMs: number;
   readonly tools: string;
+  readonly skills?: readonly string[];
   readonly description: string;
   readonly snippet: string;
   readonly guidelines: readonly string[];
@@ -298,6 +299,7 @@ async function runDelegatedPi(
       "--no-session",
       "--no-extensions",
       "--no-skills",
+      ...(config.skills ?? []).flatMap((skill) => ["--skill", skill]),
       "--no-prompt-templates",
       "--model", config.model,
       "--thinking", config.thinking,
