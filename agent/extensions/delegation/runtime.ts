@@ -41,8 +41,18 @@ export function getDelegationConfig(name: string, defaults: DelegationConfig): D
   if (!override || typeof override.model !== "string" || typeof override.thinking !== "string") {
     throw new Error(`Subagent preset "${presetName}" has no valid "${name}" configuration`);
   }
+  if (override.skills !== undefined && (
+    !Array.isArray(override.skills) || override.skills.some((skill: unknown) => typeof skill !== "string")
+  )) {
+    throw new Error(`Subagent preset "${presetName}" has invalid skills for "${name}"`);
+  }
 
-  return { ...defaults, model: override.model, thinking: override.thinking };
+  return {
+    ...defaults,
+    model: override.model,
+    thinking: override.thinking,
+    ...(override.skills === undefined ? {} : { skills: override.skills }),
+  };
 }
 
 export interface DelegationConfig {
@@ -271,6 +281,7 @@ async function runDelegatedPi(
 ) {
   const details = createDelegationDetails(config, task);
   const startedAt = Date.now();
+  const skills = config.skills ?? [];
   let buffer = "";
   let lastUpdate = 0;
 
@@ -298,8 +309,8 @@ async function runDelegatedPi(
       "-p",
       "--no-session",
       "--no-extensions",
-      "--no-skills",
-      ...(config.skills ?? []).flatMap((skill) => ["--skill", skill]),
+      ...(skills.includes("*") ? [] : ["--no-skills"]),
+      ...skills.filter((skill) => skill !== "*").flatMap((skill) => ["--skill", skill]),
       "--no-prompt-templates",
       "--model", config.model,
       "--thinking", config.thinking,

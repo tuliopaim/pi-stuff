@@ -40,7 +40,7 @@ test("subagent presets resolve from settings, environment, then session override
       subagents: {
         preset: "personal",
         presets: {
-          personal: { scout: { model: "personal/scout", thinking: "low" } },
+          personal: { scout: { model: "personal/scout", thinking: "low", skills: ["~/skills/recon"] } },
           copilot: { scout: { model: "github-copilot/scout", thinking: "medium" } },
         },
       },
@@ -49,6 +49,7 @@ test("subagent presets resolve from settings, environment, then session override
     setSubagentPreset(undefined);
     assert.equal(getActiveSubagentPresetName(), "personal");
     assert.equal(getDelegationConfig("scout", CONFIG).model, "personal/scout");
+    assert.deepEqual(getDelegationConfig("scout", CONFIG).skills, ["~/skills/recon"]);
 
     process.env.PI_SUBAGENT_PRESET = "copilot";
     assert.equal(getDelegationConfig("scout", CONFIG).model, "github-copilot/scout");

@@ -43,8 +43,8 @@ console.log(JSON.stringify({ type: "agent_settled" }));
       presets: {
         test: {
           scout: { model: "test/scout", thinking: "low" },
-          review: { model: "test/review", thinking: "medium" },
-          commit: { model: "test/commit", thinking: "high" },
+          review: { model: "test/review", thinking: "medium", skills: ["*"] },
+          commit: { model: "test/commit", thinking: "high", skills: ["~/dotfiles/skills/commit-work"] },
         },
       },
     },
@@ -128,7 +128,7 @@ console.log(JSON.stringify({ type: "agent_settled" }));
       const index = args.indexOf("--skill");
       return index === -1 ? undefined : args[index + 1];
     }), [undefined, undefined, "~/dotfiles/skills/commit-work", "~/dotfiles/skills/commit-work"]);
-    assert.ok(calls.every((args) => args.includes("--no-skills")));
+    assert.deepEqual(calls.map((args) => args.includes("--no-skills")), [true, false, true, true]);
   } finally {
     setSubagentPreset(undefined);
     if (previousPath === undefined) delete process.env.PATH;

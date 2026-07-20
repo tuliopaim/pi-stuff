@@ -113,7 +113,6 @@ const COMMIT: DelegationPolicy = {
   thinking: "medium",
   timeoutMs: 15 * 60_000,
   tools: "read,grep,find,ls,bash",
-  skills: ["~/dotfiles/skills/commit-work"],
   description: "Delegate completed-work analysis and intentional git commits to a specialized model.",
   snippet: "Delegate git commit creation to an isolated specialized child",
   guidelines: [
