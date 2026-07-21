@@ -29,7 +29,7 @@
     "~/dotfiles/pi/agent/prompts"
   ],
   "subagents": {
-    "preset": "personal",
+    "preset": "copilot",
     "presets": {
       "personal": {
         "scout": {
