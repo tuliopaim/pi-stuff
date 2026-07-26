@@ -12,7 +12,7 @@ Inspired by [Ben Davis's Pi setup](https://github.com/davis7dotsh/my-pi-setup), 
 - **A two-line footer** showing model, context usage, cost, generation speed, branch, and changed files
 - **Fresh-context plan execution** with `/implement-plan`
 - **Reusable prompts and skills**, including `/orchestrate`
-- **Web research tools** through `pi-web-access`
+- **Browser-free web research tools** through the local `web-tools` extension
 - **Simplicity-focused coding guidance** through `ponytail`
 
 ## Subagents
@@ -121,7 +121,7 @@ Use `/skill:orchestrated-task <task>` as the direct alternative. For other large
 - personal skills from `~/dotfiles/skills`
 - all local extensions from `~/dotfiles/pi/agent/extensions`
 
-The included prompt templates expose commands such as `/orchestrate`. Installed packages add `pi-web-access` for web search/content retrieval and `ponytail` for deliberately minimal, YAGNI-oriented implementation.
+The included prompt templates expose commands such as `/orchestrate`. The local `web-tools` extension provides browser-free public web search and content retrieval, while the installed `ponytail` package provides deliberately minimal, YAGNI-oriented implementation guidance.
 
 ## Shared extension structure
 
@@ -132,6 +132,7 @@ agent/
 ├── settings.json                 # models, packages, skills, prompts, extensions
 ├── extensions/
 │   ├── delegation/               # scout, review, commit, and model presets
+│   ├── web-tools/                 # browser-free public web search and fetch
 │   ├── workflows/                # sandbox, runner, dashboard, and artifacts
 │   ├── shared/                   # child sessions, trust, timeouts, context, status
 │   ├── ask-user.ts               # interactive question tool
@@ -173,4 +174,11 @@ Run only workflow tests:
 
 ```sh
 npm run --prefix ~/dotfiles/pi/agent test:workflows
+```
+
+Run the web-tools checks:
+
+```sh
+npm run --prefix ~/dotfiles/pi/agent test:web-tools
+npm run --prefix ~/dotfiles/pi/agent typecheck:web-tools
 ```

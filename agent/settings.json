@@ -13,7 +13,6 @@
   "editorPaddingX": 2,
   "hideThinkingBlock": true,
   "packages": [
-    "npm:pi-web-access",
     "git:github.com/DietrichGebert/ponytail",
     "npm:@ff-labs/pi-fff",
     "git:github.com/code-yeongyu/pi-apply-patch",
