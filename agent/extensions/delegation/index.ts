@@ -7,6 +7,7 @@ import {
   getActiveSubagentPresetName,
   getDelegationConfig,
   getSubagentPresetNames,
+  isSubagentEnabled,
   registerDelegatedTool,
   setSubagentPreset,
   type DelegationDetails,
@@ -157,18 +158,18 @@ Inspect the relevant code before editing. Make the smallest correct change, run 
 export default function (pi: ExtensionAPI) {
   if (process.env.PI_DELEGATED === "1") return;
 
-  registerDelegatedTool(pi, SCOUT);
-  registerDelegatedTool(pi, REVIEW);
-  const runCommit = registerDelegatedTool(pi, COMMIT);
-  registerDelegatedTool(pi, AGENT);
+  if (isSubagentEnabled(SCOUT.key)) registerDelegatedTool(pi, SCOUT);
+  if (isSubagentEnabled(REVIEW.key)) registerDelegatedTool(pi, REVIEW);
 
-  pi.registerMessageRenderer<DelegationDetails>("commit-result", (message, { expanded }, theme) =>
-    message.details ? renderDelegationMessage("Commit", message.details, expanded, theme) : undefined,
-  );
+  if (isSubagentEnabled(COMMIT.key)) {
+    const runCommit = registerDelegatedTool(pi, COMMIT);
+    pi.registerMessageRenderer<DelegationDetails>("commit-result", (message, { expanded }, theme) =>
+      message.details ? renderDelegationMessage("Commit", message.details, expanded, theme) : undefined,
+    );
 
-  pi.registerCommand("commit", {
-    description: "Create intentional commits with the isolated commit agent",
-    handler: async (args, ctx) => {
+    pi.registerCommand("commit", {
+      description: "Create intentional commits with the isolated commit agent",
+      handler: async (args, ctx) => {
       if (!ctx.isIdle()) {
         ctx.ui.notify("Agent is busy", "warning");
         return;
@@ -210,8 +211,11 @@ export default function (pi: ExtensionAPI) {
         stopListening?.();
         ctx.ui.setWidget("commit", undefined);
       }
-    },
-  });
+      },
+    });
+  }
+
+  if (isSubagentEnabled(AGENT.key)) registerDelegatedTool(pi, AGENT);
 
   pi.registerCommand("subagent-preset", {
     description: "Switch the model preset used by scout, review, and commit",

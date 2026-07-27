@@ -30,6 +30,13 @@ export function getActiveSubagentPresetName(): string | undefined {
     ?? (typeof configured === "string" ? configured : undefined);
 }
 
+/** A subagent is enabled unless its active-preset configuration explicitly disables it. */
+export function isSubagentEnabled(name: string): boolean {
+  const presetName = getActiveSubagentPresetName();
+  const config = presetName ? subagentSettings()?.presets?.[presetName]?.[name] : undefined;
+  return !config || typeof config !== "object" || config.enabled !== false;
+}
+
 export function setSubagentPreset(name: string | undefined) {
   sessionPreset = name;
 }

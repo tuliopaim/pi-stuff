@@ -163,6 +163,39 @@ test("delegated children do not register delegation tools", () => {
   }
 });
 
+test("does not register subagents explicitly disabled in settings", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-delegation-disabled-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const tools: any[] = [];
+  const commands: string[] = [];
+  try {
+    writeFileSync(join(dir, "settings.json"), JSON.stringify({
+      subagents: {
+        preset: "test",
+        presets: {
+          test: {
+            scout: { enabled: false },
+            commit: { enabled: false },
+          },
+        },
+      },
+    }));
+    process.env.PI_CODING_AGENT_DIR = dir;
+    registerDelegation({
+      registerTool: (tool: any) => tools.push(tool),
+      registerCommand: (name: string) => commands.push(name),
+      on() {},
+    } as any);
+
+    assert.deepEqual(tools.map((tool) => tool.name), ["review", "agent"]);
+    assert.deepEqual(commands, ["subagent-preset"]);
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("escape cancels a running /commit and records it as a cancelled result", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-delegation-cancel-"));
   const executable = join(dir, "pi");
