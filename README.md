@@ -141,11 +141,15 @@ The shared child-session layer gives workflow children the normal global/package
 
 This repository expects to live at `~/dotfiles`, because the Pi settings reference paths under that directory.
 
-Install the local extension dependencies:
+**Install the extension dependencies before starting Pi on every new machine:**
 
 ```sh
-npm install --prefix ~/dotfiles/pi/agent
+npm ci --prefix ~/dotfiles/pi/agent
 ```
+
+Do not use `pi install ~/dotfiles/pi/agent/extensions` for this. Local-path installs only register the extension directory; they do not install its npm dependencies. The included settings already load that directory.
+
+If Pi reports `Cannot find module 'html-to-text'` (or another web-tools dependency), rerun the `npm ci` command above.
 
 Link the settings file manually:
 
