@@ -85,7 +85,7 @@ Every child selects its model and reasoning effort explicitly. The intended rout
 
 Required child failures stop dependent phases rather than silently feeding them incomplete results. Schema-bound results are available when later phases need structured data.
 
-### `/orchestrate`: plan, approve, implement
+### `/orchestrate`: lean multi-agent implementation
 
 For a substantial implementation:
 
@@ -93,13 +93,7 @@ For a substantial implementation:
 /orchestrate Add organization-level API tokens
 ```
 
-The first workflow researches the codebase, builds a plan, reviews it, and stops before editing. Refine the plan in the parent conversation, then continue explicitly:
-
-```text
-Approved, continue.
-```
-
-A second workflow implements and verifies the approved plan. The split is intentional: the conversation is the human review checkpoint, and nothing commits automatically.
+Pi uses the fewest useful agents: it skips redundant planning when an issue or review already defines the work, prefers one broad implementation owner over serial handoffs, and adds integration or final review only when risk warrants it. A human checkpoint remains for unresolved consequential decisions or destructive operations. Nothing commits automatically.
 
 Use `/skill:orchestrated-task <task>` as the direct alternative. For other large jobs, ask Pi to “use a workflow” and it will generate one for that task.
 

@@ -64,7 +64,7 @@ console.log(JSON.stringify({ type: "agent_settled" }));
       sendMessage(message: any) { messages.push(message); },
     } as any);
 
-    assert.deepEqual([...tools.keys()], ["scout", "review", "commit"]);
+    assert.deepEqual([...tools.keys()], ["scout", "review", "commit", "agent"]);
     assert.deepEqual([...commands.keys()], ["commit", "subagent-preset"]);
     assert.ok(messageRenderers.has("commit-result"));
     assert.ok(events.has("session_start"));
@@ -74,7 +74,9 @@ console.log(JSON.stringify({ type: "agent_settled" }));
     for (const name of tools.keys()) {
       results.set(name, await tools.get(name).execute(
         "call-id",
-        { task: `run ${name}` },
+        name === "agent"
+          ? { task: "implement the change", model: "test/agent", thinking: "xhigh" }
+          : { task: `run ${name}` },
         undefined,
         (update: any) => updates.push(update),
         { cwd: process.cwd() },
@@ -93,6 +95,9 @@ console.log(JSON.stringify({ type: "agent_settled" }));
     assert.equal(results.get("commit").details.model, "test/commit");
     assert.equal(results.get("commit").details.truncated, true);
     assert.match(results.get("commit").details.prompt, /Use the commit-work skill/);
+    assert.equal(results.get("agent").details.model, "test/agent");
+    assert.equal(results.get("agent").details.thinking, "xhigh");
+    assert.match(tools.get("agent").promptGuidelines.join("\n"), /gpt-5\.6-sol with medium for difficult implementation/);
 
     await commands.get("commit").handler("command task", {
       cwd: process.cwd(),
@@ -116,19 +121,24 @@ console.log(JSON.stringify({ type: "agent_settled" }));
 
     const calls = readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
     assert.deepEqual(calls.map((args) => args[args.indexOf("--model") + 1]), [
-      "test/scout", "test/review", "test/commit", "test/commit",
+      "test/scout", "test/review", "test/commit", "test/agent", "test/commit",
     ]);
-    assert.deepEqual(calls.map((args) => args[args.indexOf("--tools") + 1]), [
+    assert.deepEqual(calls.map((args) => {
+      const index = args.indexOf("--tools");
+      return index === -1 ? undefined : args[index + 1];
+    }), [
       "read,grep,find,ls",
       "read,grep,find,ls,bash",
       "read,grep,find,ls,bash",
+      undefined,
       "read,grep,find,ls,bash",
     ]);
     assert.deepEqual(calls.map((args) => {
       const index = args.indexOf("--skill");
       return index === -1 ? undefined : args[index + 1];
-    }), [undefined, undefined, "~/dotfiles/skills/commit-work", "~/dotfiles/skills/commit-work"]);
-    assert.deepEqual(calls.map((args) => args.includes("--no-skills")), [true, false, true, true]);
+    }), [undefined, undefined, "~/dotfiles/skills/commit-work", undefined, "~/dotfiles/skills/commit-work"]);
+    assert.deepEqual(calls.map((args) => args.includes("--no-skills")), [true, false, true, false, true]);
+    assert.deepEqual(calls.map((args) => args.includes("--no-extensions")), [true, true, true, false, true]);
   } finally {
     setSubagentPreset(undefined);
     if (previousPath === undefined) delete process.env.PATH;
@@ -137,6 +147,19 @@ console.log(JSON.stringify({ type: "agent_settled" }));
     else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
     delete process.env.DELEGATION_TEST_LOG;
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("delegated children do not register delegation tools", () => {
+  const previous = process.env.PI_DELEGATED;
+  const tools: any[] = [];
+  try {
+    process.env.PI_DELEGATED = "1";
+    registerDelegation({ registerTool: (tool: any) => tools.push(tool) } as any);
+    assert.deepEqual(tools, []);
+  } finally {
+    if (previous === undefined) delete process.env.PI_DELEGATED;
+    else process.env.PI_DELEGATED = previous;
   }
 });
 

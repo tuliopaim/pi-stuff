@@ -128,10 +128,39 @@ const COMMIT: DelegationPolicy = {
   truncationMessage: "[Commit output truncated to 200 lines / 24KB]",
 };
 
+const AGENT: DelegationPolicy = {
+  key: "agent",
+  name: "Agent",
+  model: "opencode-go/kimi-k2.7-code",
+  thinking: "high",
+  dynamicModel: true,
+  inheritResources: true,
+  timeoutMs: 30 * 60_000,
+  description: "Delegate general-purpose coding work to an isolated agent using a task-appropriate model and reasoning level.",
+  snippet: "Delegate implementation or other general-purpose coding work to an isolated agent",
+  guidelines: [
+    "Use agent when the user asks to spin up, delegate to, or have another agent perform coding work.",
+    "When calling agent, choose its model and thinking level for the task: opencode-go/deepseek-v4-flash with medium for reconnaissance or diagnosis; opencode-go/kimi-k2.7-code with high for routine or clearly scoped implementation; openai-codex/gpt-5.6-sol with medium for difficult implementation, ambiguous behavior, architecture-sensitive changes, or hard debugging; openai-codex/gpt-5.6-sol with high for consequential planning, adversarial review, security, or data-loss work.",
+    "The agent inherits extensions, skills, and project context. Give it a self-contained task with the intended behavior and validation requirements.",
+    "Run agent synchronously and do not edit the same working tree while it is running.",
+  ],
+  parameter: "A self-contained task, including intended behavior and validation requirements",
+  prompt: `You are a delegated general-purpose coding agent. Complete the assigned task independently in the current working tree.
+
+Inspect the relevant code before editing. Make the smallest correct change, run focused validation, and report the files changed and checks run. Follow inherited project instructions and skills. Do not spawn other agents. Do not commit unless the task explicitly asks you to.`,
+  maxLines: 300,
+  maxBytes: 40 * 1024,
+  emptyOutput: "(agent returned no output)",
+  truncationMessage: "[Agent output truncated to 300 lines / 40KB]",
+};
+
 export default function (pi: ExtensionAPI) {
+  if (process.env.PI_DELEGATED === "1") return;
+
   registerDelegatedTool(pi, SCOUT);
   registerDelegatedTool(pi, REVIEW);
   const runCommit = registerDelegatedTool(pi, COMMIT);
+  registerDelegatedTool(pi, AGENT);
 
   pi.registerMessageRenderer<DelegationDetails>("commit-result", (message, { expanded }, theme) =>
     message.details ? renderDelegationMessage("Commit", message.details, expanded, theme) : undefined,

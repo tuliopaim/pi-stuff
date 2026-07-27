@@ -7,6 +7,7 @@ import { Type } from "typebox";
 import { renderDelegationCall, renderDelegationResult } from "./render.ts";
 
 let sessionPreset: string | undefined;
+const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 function subagentSettings(): any {
   try {
@@ -60,8 +61,9 @@ export interface DelegationConfig {
   readonly model: string;
   readonly thinking: string;
   readonly timeoutMs: number;
-  readonly tools: string;
+  readonly tools?: string;
   readonly skills?: readonly string[];
+  readonly inheritResources?: boolean;
   readonly description: string;
   readonly snippet: string;
   readonly guidelines: readonly string[];
@@ -71,6 +73,7 @@ export interface DelegationConfig {
 
 export interface DelegationPolicy extends DelegationConfig {
   readonly key: string;
+  readonly dynamicModel?: boolean;
   readonly maxLines: number;
   readonly maxBytes: number;
   readonly emptyOutput: string;
@@ -209,6 +212,7 @@ export function runProcess(
     cwd: string;
     timeoutMs: number;
     signal?: AbortSignal;
+    env?: NodeJS.ProcessEnv;
     onStdout?: (chunk: string) => void;
     captureStdout?: boolean;
   },
@@ -217,6 +221,7 @@ export function runProcess(
     const proc = spawn(command, args, {
       cwd: options.cwd,
       detached: process.platform !== "win32",
+      env: options.env,
       shell: false,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -308,13 +313,13 @@ async function runDelegatedPi(
       "--mode", "json",
       "-p",
       "--no-session",
-      "--no-extensions",
-      ...(skills.includes("*") ? [] : ["--no-skills"]),
-      ...skills.filter((skill) => skill !== "*").flatMap((skill) => ["--skill", skill]),
+      ...(config.inheritResources ? [] : ["--no-extensions"]),
+      ...(config.inheritResources || skills.includes("*") ? [] : ["--no-skills"]),
+      ...(config.inheritResources ? [] : skills.filter((skill) => skill !== "*").flatMap((skill) => ["--skill", skill])),
       "--no-prompt-templates",
       "--model", config.model,
       "--thinking", config.thinking,
-      "--tools", config.tools,
+      ...(config.tools ? ["--tools", config.tools] : []),
       "--append-system-prompt", config.prompt,
       `${config.name} task: ${task}`,
     ],
@@ -322,6 +327,7 @@ async function runDelegatedPi(
       cwd,
       timeoutMs: config.timeoutMs,
       signal,
+      env: { ...process.env, PI_DELEGATED: "1" },
       captureStdout: false,
       onStdout(chunk) {
         buffer += chunk;
@@ -343,14 +349,15 @@ async function runDelegatedPi(
 }
 
 export function registerDelegatedTool(pi: ExtensionAPI, policy: DelegationPolicy) {
-  const resolveConfig = () => getDelegationConfig(policy.key, policy);
+  const resolveConfig = () => policy.dynamicModel ? policy : getDelegationConfig(policy.key, policy);
   const run = async (
     task: string,
     cwd: string,
     signal?: AbortSignal,
     onUpdate?: (details: DelegationDetails) => void,
+    overrides?: Pick<DelegationConfig, "model" | "thinking">,
   ) => {
-    const details = await runDelegatedPi(resolveConfig(), task, cwd, signal, onUpdate);
+    const details = await runDelegatedPi({ ...resolveConfig(), ...overrides }, task, cwd, signal, onUpdate);
     const output = details.output || policy.emptyOutput;
     const truncated = truncateHead(output, { maxLines: policy.maxLines, maxBytes: policy.maxBytes });
     details.output = truncated.truncated
@@ -366,20 +373,36 @@ export function registerDelegatedTool(pi: ExtensionAPI, policy: DelegationPolicy
     description: `${policy.description} Hard timeout: ${policy.timeoutMs / 1000}s.`,
     promptSnippet: policy.snippet,
     promptGuidelines: [...policy.guidelines],
-    parameters: Type.Object({ task: Type.String({ description: policy.parameter }) }),
+    parameters: policy.dynamicModel
+      ? Type.Object({
+          task: Type.String({ description: policy.parameter }),
+          model: Type.String({ description: "Exact provider/model id chosen for this task" }),
+          thinking: Type.String({ description: "Reasoning level: off, minimal, low, medium, high, xhigh, or max" }),
+        })
+      : Type.Object({ task: Type.String({ description: policy.parameter }) }),
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      if (policy.dynamicModel && !THINKING_LEVELS.has((params as any).thinking)) {
+        throw new Error(`Invalid thinking level: ${(params as any).thinking}`);
+      }
+      const overrides = policy.dynamicModel
+        ? { model: (params as any).model, thinking: (params as any).thinking }
+        : undefined;
       const details = await run(params.task, ctx.cwd, signal, (details) => {
         onUpdate?.({
           content: [{ type: "text", text: details.output || details.activities.at(-1) || "(running…)" }],
           details,
         });
-      });
+      }, overrides);
       return { content: [{ type: "text", text: details.output }], details };
     },
 
     renderCall(args, theme, context) {
-      const config = (context.state.config as DelegationConfig | undefined) ?? resolveConfig();
+      const config = (context.state.config as DelegationConfig | undefined) ?? {
+        ...resolveConfig(),
+        ...(policy.dynamicModel && typeof (args as any).model === "string" ? { model: (args as any).model } : {}),
+        ...(policy.dynamicModel && typeof (args as any).thinking === "string" ? { thinking: (args as any).thinking } : {}),
+      };
       context.state.config = config;
       return renderDelegationCall(config, args.task, context.expanded, theme);
     },
