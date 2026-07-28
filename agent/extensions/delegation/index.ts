@@ -36,7 +36,7 @@ const SCOUT: DelegationPolicy = {
   guidelines: [
     "Use scout before broad exploration when locating the answer likely requires more than 2-3 files.",
     "Do not use scout for work answerable with one or two direct reads, after equivalent reconnaissance is already done, for implementation, or for decisions requiring your own judgment.",
-    "Give scout one narrow, self-contained question and use it at most once per task unless the user explicitly requests broader investigation.",
+    "Use one scout by default. Use a second only when two reconnaissance questions are independent and combining them would make either scout broad or duplicative.",
     "After scout returns, read only its recommended targets and verify only claims that affect edits or important decisions.",
   ],
   parameter: "One narrow, self-contained reconnaissance question, including the evidence the parent needs",
@@ -153,7 +153,9 @@ const AGENT: DelegationPolicy = {
   description: "Delegate general-purpose coding work to a persistent agent using a task-appropriate model and reasoning level.",
   snippet: "Delegate implementation or other general-purpose coding work to a persistent agent",
   guidelines: [
-    "Use agent when the user asks to spin up, delegate to, or have another agent perform coding work.",
+    "Use the fewest agents that materially reduce context, uncertainty, or elapsed time: default to zero for clear local work, and use one for a self-contained delegated workstream.",
+    "Use agent when the user asks to delegate, or when one agent can independently own a substantial implementation or investigation while the parent avoids overlapping edits.",
+    "Do not split connected implementation across agents in one working tree. Fan out only independent read-only work, or mutating work in separate working trees.",
     "When calling agent, choose its model and thinking level for the task: opencode-go/deepseek-v4-flash with medium for reconnaissance or diagnosis; opencode-go/kimi-k2.7-code with high for routine or clearly scoped implementation; openai-codex/gpt-5.6-sol with medium for difficult implementation, ambiguous behavior, architecture-sensitive changes, or hard debugging; openai-codex/gpt-5.6-sol with high for consequential planning, adversarial review, security, or data-loss work.",
     "The agent inherits extensions, skills, and project context. Give it a self-contained task with the intended behavior and validation requirements.",
     "Run agent synchronously and do not edit the same working tree while it is running.",
@@ -308,7 +310,13 @@ export default function (
 
   pi.registerTool({
     name: "subagent_spawn", label: "Spawn Subagent",
-    description: "Start a persistent Pi subagent in the background and return its ID. Max four running; one mutating agent per working directory.",
+    description: "Start a persistent Pi subagent in the background and return its ID. Max four running; one mutating agent per working tree.",
+    promptSnippet: "Start a persistent background subagent for an independent workstream",
+    promptGuidelines: [
+      "Default to no background subagent for clear local work. Spawn one only when it can proceed independently without overlapping the parent's edits.",
+      "Use two to four only for genuinely independent workstreams in separate working trees. For parallel read-only fan-out in one tree, use workflow instead.",
+      "Treat four as a hard ceiling, not a target. Wait for results only when the parent needs them for its next decision.",
+    ],
     parameters: Type.Object({
       task: Type.String({ description: "Self-contained task" }),
       name: Type.String({ description: "Short display name" }),

@@ -8,6 +8,7 @@ import type {
 import { Type } from "typebox";
 import { childToolPolicy } from "../shared/child-session.ts";
 import { validateAgentSelection } from "./index.ts";
+import { WORKFLOW_PROMPT_GUIDELINES, WORKFLOW_TOOL_DESCRIPTION } from "./prompt.ts";
 import {
   createFirstResponseWatchdog,
   guardWorkflowChildTools,
@@ -30,6 +31,13 @@ const zeroUsage = {
     total: 0,
   },
 };
+
+test("workflow guidance scales fan-out and protects the shared working tree", () => {
+  assert.match(WORKFLOW_TOOL_DESCRIPTION, /at least two independent workstreams or real phase dependencies/);
+  assert.doesNotMatch(WORKFLOW_TOOL_DESCRIPTION, /only to be called/);
+  assert.match(WORKFLOW_PROMPT_GUIDELINES.join("\n"), /zero for clear local work/);
+  assert.match(WORKFLOW_PROMPT_GUIDELINES.join("\n"), /at most one mutating agent/);
+});
 
 function parallelToolMessages(): AgentSession["messages"] {
   return [

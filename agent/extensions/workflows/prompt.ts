@@ -17,8 +17,8 @@ export const WORKFLOW_PARAMETER_DESCRIPTIONS = {
 
 /** Defines the workflow DSL, constraints, reliability guidance, and model-authored task examples. */
 export const WORKFLOW_TOOL_DESCRIPTION = [
-  "The workflow tool is only to be called when the user says 'ultracode' or specifically requests a workflow run.",
-  "Run a multi-agent workflow from a JavaScript orchestration script you write inline. Use this when a task benefits from fanning work out across several isolated subagents in ordered phases (research fan-out, per-file review, verify-then-synthesize pipelines).",
+  "Use the workflow tool when the user explicitly requests a workflow, or when a substantial task has at least two independent workstreams or real phase dependencies that materially benefit from orchestration.",
+  "Run a multi-agent workflow from a JavaScript orchestration script you write inline. Subagents have separate model contexts but share the working tree. Suitable shapes include read-only research fan-out, per-file review, and reconnaissance-then-implementation pipelines.",
   "The script runs as an async function body with these primitives:",
   "• export const meta = { name, description, phases: [{ title, detail? }] } — metadata for the progress UI. Declare all phases up front.",
   "• phase(title) — mark the current phase at runtime (use titles from meta.phases).",
@@ -44,11 +44,13 @@ export const WORKFLOW_TOOL_DESCRIPTION = [
 
 /** Adds workflow orchestration primitives and background execution to the model's tool prompt. */
 export const WORKFLOW_PROMPT_SNIPPET =
-  "Orchestrate isolated subagents from an inline JS script: phase()/agent()/parallel() with structured outputs and optional background execution";
+  "Orchestrate separate-context subagents from an inline JS script: phase()/agent()/parallel() with structured outputs and optional background execution";
 
 /** Guides the model on appropriate workflow fan-out and mandatory agent result checks. */
 export const WORKFLOW_PROMPT_GUIDELINES = [
-  "Use workflow when a task needs several subagents with phase dependencies or dynamic fan-out; keep focused one-off reconnaissance, review, and commit work in scout, review, and commit.",
+  "Use the fewest agents that materially reduce context, uncertainty, or elapsed time: zero for clear local work, one for a single self-contained workstream, and two to four only for independent fan-out or real phase dependencies.",
+  "Use workflow when a task needs several subagents with phase dependencies or dynamic fan-out; keep focused one-off reconnaissance, review, implementation, and commit work in scout, review, agent, and commit.",
+  "Subagents share the working tree. Use at most one mutating agent in a workflow; parallel fan-out must be read-only. Prefer one implementation owner for connected changes.",
   "In workflow scripts, every agent() call must explicitly set `model` and `effort`; omission fails safely before a provider request.",
   "Use DeepSeek V4 Flash/medium for reconnaissance, Kimi K2.7 Code/high for implementation, and reserve GPT-5.6 Sol/high for planning or consequential adversarial/final review.",
   "Agents are required by default, so a failure mechanically blocks later agent calls. Let required failures return to the parent orchestrator for a retry decision; do not blindly retry inside the workflow. Use `optional: true` only for planned best-effort read-only work whose absence cannot affect later phases. Never feed placeholders or incomplete findings into dependent or premium phases, repeat an unchanged timeout, or automatically retry mutating agents.",

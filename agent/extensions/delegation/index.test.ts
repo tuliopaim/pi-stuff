@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -33,6 +33,20 @@ test("registers existing and persistent subagent APIs", () => {
   assert.deepEqual(registered.entries, ["btw-result"]);
   assert.ok(registered.events.includes("session_start"));
   assert.ok(registered.events.includes("session_shutdown"));
+});
+
+test("model guidance scales delegation by independent workstreams", () => {
+  const tools = new Map<string, any>();
+  registerDelegation({
+    registerTool(tool: any) { tools.set(tool.name, tool); }, registerCommand() {}, registerMessageRenderer() {}, registerEntryRenderer() {}, on() {},
+  } as any);
+  assert.match(tools.get("scout").promptGuidelines.join("\n"), /Use one scout by default/);
+  assert.match(tools.get("agent").promptGuidelines.join("\n"), /default to zero for clear local work/);
+  assert.match(tools.get("agent").promptGuidelines.join("\n"), /Do not split connected implementation/);
+  assert.match(tools.get("subagent_spawn").promptGuidelines.join("\n"), /Treat four as a hard ceiling, not a target/);
+
+  const orchestrate = readFileSync(join(process.cwd(), "prompts/orchestrate.md"), "utf8");
+  assert.match(orchestrate, /Use at most one mutating agent in the workflow/);
 });
 
 test("agent renderer replaces its Kimi default when streamed arguments select Sol", () => {
