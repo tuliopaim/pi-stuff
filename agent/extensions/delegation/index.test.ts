@@ -1,153 +1,52 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
 import registerDelegation from "./index.ts";
-import { renderDelegationMessage } from "./render.ts";
 import { setSubagentPreset } from "./runtime.ts";
 
-const output = Array.from({ length: 225 }, (_, index) => `line ${index} ${"x".repeat(120)}`).join("\n");
+function registrationHarness() {
+  const tools: string[] = [];
+  const commands: string[] = [];
+  const events: string[] = [];
+  const renderers: string[] = [];
+  const entries: string[] = [];
+  registerDelegation({
+    registerTool(tool: any) { tools.push(tool.name); },
+    registerCommand(name: string) { commands.push(name); },
+    registerMessageRenderer(name: string) { renderers.push(name); },
+    registerEntryRenderer(name: string) { entries.push(name); },
+    on(name: string) { events.push(name); },
+  } as any);
+  return { tools, commands, events, renderers, entries };
+}
 
-const testTheme = {
-  fg: (_color: string, text: string) => text,
-  bg: (_color: string, text: string) => text,
-  bold: (text: string) => text,
-} as any;
+test("registers existing and persistent subagent APIs", () => {
+  const registered = registrationHarness();
+  assert.deepEqual(registered.tools, [
+    "scout", "review", "commit", "agent",
+    "subagent_spawn", "subagent_wait", "subagent_cancel", "subagent_check", "subagent_list",
+  ]);
+  assert.deepEqual(registered.commands, ["commit", "subagents", "btw", "subagent-preset"]);
+  assert.deepEqual(registered.renderers, ["commit-result", "subagent-result"]);
+  assert.deepEqual(registered.entries, ["btw-result"]);
+  assert.ok(registered.events.includes("session_start"));
+  assert.ok(registered.events.includes("session_shutdown"));
+});
 
-test("registers delegation adapters and executes tools through their policies", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "pi-delegation-extension-"));
-  const executable = join(dir, "pi");
-  const log = join(dir, "calls.jsonl");
-  const previousPath = process.env.PATH;
-  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-  const tools = new Map<string, any>();
-  const commands = new Map<string, any>();
-  const events = new Map<string, any>();
-  const messageRenderers = new Map<string, any>();
-  const messages: any[] = [];
-  const widgets: any[] = [];
-
-  writeFileSync(executable, `#!/usr/bin/env node
-const fs = require("node:fs");
-fs.appendFileSync(process.env.DELEGATION_TEST_LOG, JSON.stringify(process.argv.slice(2)) + "\\n");
-console.log(JSON.stringify({ type: "tool_execution_start", toolName: "read", args: { path: "src/index.ts" } }));
-console.log(JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "starting" } }));
-console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: ${JSON.stringify(output)} }], stopReason: "stop", usage: { input: 10, output: 20, totalTokens: 30, cost: { total: 0.01 } } } }));
-console.log(JSON.stringify({ type: "agent_settled" }));
-`);
-  chmodSync(executable, 0o755);
-  writeFileSync(join(dir, "settings.json"), JSON.stringify({
-    subagents: {
-      preset: "test",
-      presets: {
-        test: {
-          scout: { model: "test/scout", thinking: "low" },
-          review: { model: "test/review", thinking: "medium", skills: ["*"] },
-          commit: { model: "test/commit", thinking: "high", skills: ["~/dotfiles/skills/commit-work"] },
-        },
-      },
-    },
-  }));
-
-  try {
-    process.env.PATH = `${dir}${delimiter}${previousPath ?? ""}`;
-    process.env.PI_CODING_AGENT_DIR = dir;
-    process.env.DELEGATION_TEST_LOG = log;
-    setSubagentPreset(undefined);
-
-    registerDelegation({
-      registerTool(tool: any) { tools.set(tool.name, tool); },
-      registerCommand(name: string, command: any) { commands.set(name, command); },
-      registerMessageRenderer(customType: string, renderer: any) { messageRenderers.set(customType, renderer); },
-      on(name: string, handler: any) { events.set(name, handler); },
-      sendMessage(message: any) { messages.push(message); },
-    } as any);
-
-    assert.deepEqual([...tools.keys()], ["scout", "review", "commit", "agent"]);
-    assert.deepEqual([...commands.keys()], ["commit", "subagent-preset"]);
-    assert.ok(messageRenderers.has("commit-result"));
-    assert.ok(events.has("session_start"));
-
-    const updates: any[] = [];
-    const results = new Map<string, any>();
-    for (const name of tools.keys()) {
-      results.set(name, await tools.get(name).execute(
-        "call-id",
-        name === "agent"
-          ? { task: "implement the change", model: "test/agent", thinking: "xhigh" }
-          : { task: `run ${name}` },
-        undefined,
-        (update: any) => updates.push(update),
-        { cwd: process.cwd() },
-      ));
-    }
-
-    assert.ok(updates.length >= 6);
-    assert.equal(updates.at(-1).details.status, "done");
-    assert.deepEqual(updates.at(-1).details.activities, ["read src/index.ts"]);
-    assert.equal(results.get("scout").details.model, "test/scout");
-    assert.equal(results.get("scout").details.usage.turns, 1);
-    assert.equal(results.get("scout").details.truncated, true);
-    assert.match(results.get("scout").content[0].text, /Scout output truncated to 200 lines \/ 24KB/);
-    assert.equal(results.get("review").details.model, "test/review");
-    assert.equal(results.get("review").details.truncated, false);
-    assert.equal(results.get("commit").details.model, "test/commit");
-    assert.equal(results.get("commit").details.truncated, true);
-    assert.match(results.get("commit").details.prompt, /Use the commit-work skill/);
-    assert.equal(results.get("agent").details.model, "test/agent");
-    assert.equal(results.get("agent").details.thinking, "xhigh");
-    assert.match(tools.get("agent").promptGuidelines.join("\n"), /gpt-5\.6-sol with medium for difficult implementation/);
-
-    await commands.get("commit").handler("command task", {
-      cwd: process.cwd(),
-      isIdle: () => true,
-      ui: {
-        notify() {},
-        setWidget: (key: string, content: any) => widgets.push([key, content]),
-        onTerminalInput: () => () => {},
-      },
-    });
-    assert.equal(messages.length, 1);
-    assert.equal(messages[0].customType, "commit-result");
-    assert.equal(messages[0].display, true);
-    assert.equal(messages[0].details.status, "done");
-    assert.ok(widgets.length >= 2);
-    assert.equal(typeof widgets.at(0)[1], "function");
-    assert.deepEqual(widgets.at(-1), ["commit", undefined]);
-
-    assert.ok(messageRenderers.get("commit-result")(messages[0], { expanded: false }, testTheme));
-    assert.equal(messageRenderers.get("commit-result")({ details: undefined }, { expanded: false }, testTheme), undefined);
-
-    const calls = readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-    assert.deepEqual(calls.map((args) => args[args.indexOf("--model") + 1]), [
-      "test/scout", "test/review", "test/commit", "test/agent", "test/commit",
-    ]);
-    assert.deepEqual(calls.map((args) => {
-      const index = args.indexOf("--tools");
-      return index === -1 ? undefined : args[index + 1];
-    }), [
-      "read,grep,find,ls",
-      "read,grep,find,ls,bash",
-      "read,grep,find,ls,bash",
-      undefined,
-      "read,grep,find,ls,bash",
-    ]);
-    assert.deepEqual(calls.map((args) => {
-      const index = args.indexOf("--skill");
-      return index === -1 ? undefined : args[index + 1];
-    }), [undefined, undefined, "~/dotfiles/skills/commit-work", undefined, "~/dotfiles/skills/commit-work"]);
-    assert.deepEqual(calls.map((args) => args.includes("--no-skills")), [true, false, true, false, true]);
-    assert.deepEqual(calls.map((args) => args.includes("--no-extensions")), [true, true, true, false, true]);
-  } finally {
-    setSubagentPreset(undefined);
-    if (previousPath === undefined) delete process.env.PATH;
-    else process.env.PATH = previousPath;
-    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-    delete process.env.DELEGATION_TEST_LOG;
-    rmSync(dir, { recursive: true, force: true });
-  }
+test("agent renderer replaces its Kimi default when streamed arguments select Sol", () => {
+  let agentTool: any;
+  registerDelegation({
+    registerTool(tool: any) { if (tool.name === "agent") agentTool = tool; },
+    registerCommand() {}, registerMessageRenderer() {}, registerEntryRenderer() {}, on() {},
+  } as any);
+  const context: any = { state: {}, expanded: false };
+  const theme: any = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+  agentTool.renderCall({ task: "review this" }, theme, context);
+  agentTool.renderCall({ task: "review this", model: "openai-codex/gpt-5.6-sol", thinking: "high" }, theme, context);
+  assert.equal(context.state.config.model, "openai-codex/gpt-5.6-sol");
+  assert.equal(context.state.config.thinking, "high");
 });
 
 test("delegated children do not register delegation tools", () => {
@@ -163,104 +62,170 @@ test("delegated children do not register delegation tools", () => {
   }
 });
 
-test("does not register subagents explicitly disabled in settings", () => {
+test("does not register predefined policies explicitly disabled in settings", () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-delegation-disabled-"));
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-  const tools: any[] = [];
-  const commands: string[] = [];
   try {
     writeFileSync(join(dir, "settings.json"), JSON.stringify({
-      subagents: {
-        preset: "test",
-        presets: {
-          test: {
-            scout: { enabled: false },
-            commit: { enabled: false },
-          },
-        },
-      },
+      subagents: { preset: "test", presets: { test: { scout: { enabled: false }, commit: { enabled: false } } } },
     }));
     process.env.PI_CODING_AGENT_DIR = dir;
-    registerDelegation({
-      registerTool: (tool: any) => tools.push(tool),
-      registerCommand: (name: string) => commands.push(name),
-      on() {},
-    } as any);
-
-    assert.deepEqual(tools.map((tool) => tool.name), ["review", "agent"]);
-    assert.deepEqual(commands, ["subagent-preset"]);
+    setSubagentPreset(undefined);
+    const registered = registrationHarness();
+    assert.deepEqual(registered.tools.slice(0, 2), ["review", "agent"]);
+    assert.ok(!registered.commands.includes("commit"));
+    assert.ok(registered.commands.includes("subagent-preset"));
   } finally {
+    setSubagentPreset(undefined);
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("escape cancels a running /commit and records it as a cancelled result", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "pi-delegation-cancel-"));
-  const executable = join(dir, "pi");
-  const previousPath = process.env.PATH;
-  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+test("/commit keeps progress, Escape cancellation, and custom result delivery", async () => {
   const commands = new Map<string, any>();
+  const events = new Map<string, any>();
   const messages: any[] = [];
   const widgets: any[] = [];
-  let inputHandler: ((data: string) => unknown) | undefined;
-  let unsubscribed = false;
+  let terminalInput: ((data: string) => unknown) | undefined;
+  let finishWait!: () => void;
+  const waiting = new Promise<void>((resolve) => { finishWait = resolve; });
+  const snapshot: any = {
+    id: "sa_commit", origin: "commit", title: "commit", task: "commit", cwd: process.cwd(), model: "test/model", thinking: "low",
+    status: "running", mutating: true, createdAt: Date.now(), output: "", liveText: "working", liveThinking: "", activities: ["git status"], queued: [], transcript: [],
+    usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0 }, consumed: true,
+  };
+  const listeners = new Set<() => void>();
+  const manager: any = {
+    list: () => [snapshot], get: () => snapshot, subscribe: () => () => {}, subscribeTo: (_id: string, listener: () => void) => { listeners.add(listener); return () => listeners.delete(listener); },
+    spawn: async (options: any) => { options.signal?.addEventListener("abort", () => void manager.cancel([snapshot.id]), { once: true }); return snapshot; },
+    wait: async () => { await waiting; return [snapshot]; },
+    cancel: async () => { snapshot.status = "cancelled"; snapshot.error = "Cancelled"; snapshot.settledAt = Date.now(); for (const listener of listeners) listener(); finishWait(); return [snapshot]; },
+    shutdown: async () => {}, consume: () => {},
+  };
+  registerDelegation({
+    registerTool() {}, registerCommand(name: string, command: any) { commands.set(name, command); },
+    registerMessageRenderer() {}, registerEntryRenderer() {}, on(name: string, handler: any) { events.set(name, handler); },
+    sendMessage(message: any) { messages.push(message); }, getThinkingLevel: () => "low",
+  } as any, () => manager);
+  const ui: any = {
+    theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+    setStatus() {}, notify() {}, setWidget: (key: string, content: any) => widgets.push([key, content]),
+    onTerminalInput(handler: any) { terminalInput = handler; return () => {}; },
+  };
+  const ctx: any = { cwd: process.cwd(), mode: "tui", hasUI: true, isIdle: () => true, ui, sessionManager: { getSessionId: () => "parent" } };
+  events.get("session_start")({}, ctx);
+  const running = commands.get("commit").handler("commit this", ctx);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(typeof widgets.at(-1)?.[1], "function");
+  assert.deepEqual(terminalInput?.("\x1b"), { consume: true });
+  await running;
+  assert.equal(messages[0].customType, "commit-result");
+  assert.equal(messages[0].details.status, "cancelled");
+  assert.deepEqual(widgets.at(-1), ["commit", undefined]);
+});
 
-  // Emits one activity so the widget renders, then hangs until it is killed.
-  writeFileSync(executable, `#!/usr/bin/env node
-console.log(JSON.stringify({ type: "tool_execution_start", toolName: "read", args: { path: "src/index.ts" } }));
-setTimeout(() => {}, 60000);
-`);
-  chmodSync(executable, 0o755);
-  writeFileSync(join(dir, "settings.json"), JSON.stringify({ subagents: {} }));
+test("Escape during /commit setup is reported as cancellation", async () => {
+  const commands = new Map<string, any>();
+  const events = new Map<string, any>();
+  const messages: any[] = [];
+  let terminalInput: ((data: string) => unknown) | undefined;
+  const manager: any = {
+    list: () => [], subscribe: () => () => {}, shutdown: async () => {},
+    spawn: async (options: any) => new Promise((_resolve, reject) => {
+      const abort = () => reject(options.signal.reason);
+      if (options.signal.aborted) abort(); else options.signal.addEventListener("abort", abort, { once: true });
+    }),
+  };
+  registerDelegation({
+    registerTool() {}, registerCommand(name: string, command: any) { commands.set(name, command); }, registerMessageRenderer() {}, registerEntryRenderer() {},
+    on(name: string, handler: any) { events.set(name, handler); }, sendMessage(message: any) { messages.push(message); },
+  } as any, () => manager);
+  const ctx: any = {
+    cwd: process.cwd(), mode: "tui", hasUI: true, isIdle: () => true, sessionManager: { getSessionId: () => "parent" },
+    ui: { theme: { fg: (_color: string, text: string) => text }, setStatus() {}, setWidget() {}, notify() {}, onTerminalInput(handler: any) { terminalInput = handler; return () => {}; } },
+  };
+  events.get("session_start")({}, ctx);
+  const running = commands.get("commit").handler("commit", ctx);
+  await new Promise((resolve) => setImmediate(resolve));
+  terminalInput?.("\x1b");
+  await running;
+  assert.equal(messages[0].details.status, "cancelled");
+  assert.match(messages[0].content, /cancelled/i);
+});
 
-  try {
-    process.env.PATH = `${dir}${delimiter}${previousPath ?? ""}`;
-    process.env.PI_CODING_AGENT_DIR = dir;
-    setSubagentPreset(undefined);
+test("restored unconsumed background results are delivered once and consumed", async () => {
+  const events = new Map<string, any>();
+  const messages: any[] = [];
+  const consumed: string[] = [];
+  const snapshot: any = {
+    id: "sa_restored", origin: "generic", title: "done", task: "task", cwd: process.cwd(), model: "test/model", thinking: "low",
+    status: "done", mutating: true, createdAt: Date.now(), settledAt: Date.now(), output: "answer", liveText: "", liveThinking: "", activities: [], queued: [], transcript: [],
+    usage: { turns: 1, input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 2 }, consumed: false, restored: true,
+  };
+  const manager: any = { list: () => [snapshot], subscribe: () => () => {}, shutdown: async () => {}, consume: (id: string) => { consumed.push(id); snapshot.consumed = true; } };
+  registerDelegation({
+    registerTool() {}, registerCommand() {}, registerMessageRenderer() {}, registerEntryRenderer() {},
+    on(name: string, handler: any) { events.set(name, handler); }, sendMessage(message: any) { messages.push(message); },
+  } as any, () => manager);
+  const ctx: any = {
+    hasUI: false, isIdle: () => true, ui: { setStatus() {}, notify() {}, theme: {} },
+    sessionManager: { getSessionId: () => "parent" },
+  };
+  events.get("session_start")({}, ctx);
+  await new Promise((resolve) => setImmediate(resolve));
+  events.get("agent_settled")();
+  assert.equal(messages.length, 1);
+  assert.deepEqual(consumed, ["sa_restored"]);
+});
 
-    registerDelegation({
-      registerTool() {},
-      registerCommand(name: string, command: any) { commands.set(name, command); },
-      registerMessageRenderer() {},
-      on() {},
-      sendMessage(message: any) { messages.push(message); },
-    } as any);
+test("/btw persists a TUI entry without injecting the answer into model context", async () => {
+  const commands = new Map<string, any>();
+  const events = new Map<string, any>();
+  const appended: any[] = [];
+  const messages: any[] = [];
+  let onSettled!: (snapshot: any) => void;
+  const snapshot: any = {
+    id: "btw_one", origin: "btw", title: "side question", task: "side question", cwd: process.cwd(), model: "test/model", thinking: "low",
+    status: "done", mutating: false, createdAt: Date.now(), settledAt: Date.now(), output: "side answer", liveText: "", liveThinking: "", activities: [], queued: [], transcript: [],
+    usage: { turns: 1, input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 2 }, consumed: false,
+  };
+  const manager: any = { list: () => [], get: () => snapshot, subscribe: () => () => {}, subscribeTo: () => () => {}, spawn: async () => { queueMicrotask(() => onSettled(snapshot)); return snapshot; }, shutdown: async () => {} };
+  registerDelegation({
+    registerTool() {}, registerCommand(name: string, command: any) { commands.set(name, command); }, registerMessageRenderer() {}, registerEntryRenderer() {},
+    on(name: string, handler: any) { events.set(name, handler); }, sendMessage(message: any) { messages.push(message); },
+    appendEntry(type: string, data: any) { appended.push([type, data]); }, getThinkingLevel: () => "low",
+  } as any, (_ctx, _id, settled) => { onSettled = settled; return manager; });
+  const ctx: any = {
+    cwd: process.cwd(), mode: "tui", hasUI: true, model: { provider: "test", id: "model" }, isIdle: () => true,
+    sessionManager: { getSessionId: () => "parent" },
+    ui: { theme: {}, setStatus() {}, notify() {}, custom: async () => {} },
+  };
+  events.get("session_start")({}, ctx);
+  await commands.get("btw").handler("side question", ctx);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(appended[0][0], "btw-result");
+  assert.equal(appended[0][1].answer, "side answer");
+  assert.deepEqual(messages, []);
+});
 
-    const finished = commands.get("commit").handler("", {
-      cwd: process.cwd(),
-      isIdle: () => true,
-      ui: {
-        notify() {},
-        setWidget: (key: string, content: any) => widgets.push([key, content]),
-        onTerminalInput: (handler: any) => {
-          inputHandler = handler;
-          return () => { unsubscribed = true; };
-        },
-      },
-    });
-
-    // Wait for the child to emit its first activity, then press escape.
-    while (widgets.length === 0) await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.deepEqual(inputHandler?.("\x1b"), { consume: true });
-    await finished;
-
-    assert.equal(messages.length, 1);
-    assert.equal(messages[0].customType, "commit-result");
-    assert.equal(messages[0].details.status, "cancelled");
-    assert.match(messages[0].content, /cancelled/i);
-    assert.equal(unsubscribed, true);
-    assert.deepEqual(widgets.at(-1), ["commit", undefined]);
-
-    // A cancelled run still renders through the same message renderer path.
-    assert.ok(renderDelegationMessage("Commit", messages[0].details, false, testTheme));
-  } finally {
-    setSubagentPreset(undefined);
-    if (previousPath === undefined) delete process.env.PATH;
-    else process.env.PATH = previousPath;
-    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-    rmSync(dir, { recursive: true, force: true });
-  }
+test("model-facing management tools reject TUI-only /btw sessions", async () => {
+  const tools = new Map<string, any>();
+  const events = new Map<string, any>();
+  const btw: any = { id: "btw_secret", origin: "btw", status: "done" };
+  const manager: any = {
+    list: () => [btw], get: (id: string) => id === btw.id ? btw : undefined, subscribe: () => () => {}, shutdown: async () => {},
+    wait: async () => [btw], cancel: async () => [btw],
+  };
+  registerDelegation({
+    registerTool(tool: any) { tools.set(tool.name, tool); }, registerCommand() {}, registerMessageRenderer() {}, registerEntryRenderer() {},
+    on(name: string, handler: any) { events.set(name, handler); },
+  } as any, () => manager);
+  events.get("session_start")({}, { hasUI: false, ui: { setStatus() {}, notify() {} }, sessionManager: { getSessionId: () => "parent" } });
+  await assert.rejects(tools.get("subagent_wait").execute("call", { ids: [btw.id] }), /only available through the TUI/);
+  await assert.rejects(tools.get("subagent_cancel").execute("call", { ids: [btw.id] }), /only available through the TUI/);
+  await assert.rejects(tools.get("subagent_check").execute("call", { id: btw.id }), /Unknown subagent/);
+  const listed = await tools.get("subagent_list").execute("call", {});
+  assert.equal(listed.content[0].text, "No subagents.");
 });

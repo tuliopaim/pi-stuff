@@ -243,6 +243,7 @@ test("workflow children cannot recursively delegate", () => {
     "scout",
     "review",
     "commit",
+    "agent",
     "ask_user",
   ]);
 });

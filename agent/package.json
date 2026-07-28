@@ -6,6 +6,7 @@
     "@earendil-works/pi-ai": "0.80.7",
     "@earendil-works/pi-tui": "^0.80.7",
     "acorn": "^8.17.0",
+    "effect": "4.0.0-beta.99",
     "html-to-text": "^9.0.5",
     "linkedom": "^0.18.12",
     "turndown": "^7.2.0",

@@ -21,6 +21,7 @@ export const CHILD_EXCLUDED_TOOL_NAMES = [
   "scout",
   "review",
   "commit",
+  "agent",
   "ask_user",
 ] as const;
 
@@ -34,6 +35,10 @@ export interface ChildResourceOptions {
   projectTrusted: boolean;
   appendSystemPrompt?: string[];
   agentDir?: string;
+  noExtensions?: boolean;
+  noSkills?: boolean;
+  additionalSkillPaths?: string[];
+  noPromptTemplates?: boolean;
 }
 
 /** Load normal global/package resources and trust-gated project resources. */
@@ -46,6 +51,10 @@ export async function createChildResources(options: ChildResourceOptions) {
     cwd: options.cwd,
     agentDir,
     settingsManager,
+    ...(options.noExtensions ? { noExtensions: true } : {}),
+    ...(options.noSkills ? { noSkills: true } : {}),
+    ...(options.additionalSkillPaths ? { additionalSkillPaths: options.additionalSkillPaths } : {}),
+    ...(options.noPromptTemplates ? { noPromptTemplates: true } : {}),
     ...(options.appendSystemPrompt
       ? { appendSystemPrompt: options.appendSystemPrompt }
       : {}),

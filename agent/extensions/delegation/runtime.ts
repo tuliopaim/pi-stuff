@@ -1,10 +1,10 @@
-import { spawn, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { truncateHead, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { renderDelegationCall, renderDelegationResult } from "./render.ts";
+import { delegationDetails, truncateSubagentOutput, type SubagentManager } from "./manager.ts";
 
 let sessionPreset: string | undefined;
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -80,6 +80,7 @@ export interface DelegationConfig {
 
 export interface DelegationPolicy extends DelegationConfig {
   readonly key: string;
+  readonly mutating: boolean;
   readonly dynamicModel?: boolean;
   readonly maxLines: number;
   readonly maxBytes: number;
@@ -119,27 +120,7 @@ export interface DelegationDetails {
   };
   truncated?: boolean;
   lastStopReason?: string;
-}
-
-function textFromMessage(message: any) {
-  return Array.isArray(message?.content)
-    ? message.content.filter((part: any) => part.type === "text").map((part: any) => part.text).join("\n")
-    : "";
-}
-
-function formatTool(toolName: string, args: Record<string, unknown>) {
-  const path = String(args.path ?? args.file_path ?? ".");
-  switch (toolName) {
-    case "read": return `read ${path}${args.offset ? `:${args.offset}` : ""}`;
-    case "grep": return `grep /${String(args.pattern ?? "")}/ in ${path}`;
-    case "find": return `find ${String(args.pattern ?? "*")} in ${path}`;
-    case "ls": return `ls ${path}`;
-    case "bash": {
-      const command = String(args.command ?? "");
-      return `$ ${command.length > 100 ? `${command.slice(0, 100)}…` : command}`;
-    }
-    default: return `${toolName} ${JSON.stringify(args)}`;
-  }
+  sessionFile?: string;
 }
 
 export function createDelegationDetails(config: DelegationConfig, task: string): DelegationDetails {
@@ -156,206 +137,7 @@ export function createDelegationDetails(config: DelegationConfig, task: string):
   };
 }
 
-/** Apply one event from `pi --mode json`; returns whether the visible state changed. */
-export function applyDelegationEvent(details: DelegationDetails, event: any) {
-  if (event.type === "message_start" && event.message?.role === "assistant") {
-    details.output = "";
-    return true;
-  }
-
-  if (event.type === "message_update") {
-    const update = event.assistantMessageEvent;
-    if (update?.type === "text_delta" && typeof update.delta === "string") {
-      details.output += update.delta;
-      return true;
-    }
-  }
-
-  if (event.type === "tool_execution_start") {
-    details.activities.push(formatTool(event.toolName, event.args ?? {}));
-    if (details.activities.length > 100) details.activities.shift();
-    return true;
-  }
-
-  if (event.type === "tool_execution_end" && event.isError) {
-    details.activities.push(`✗ ${event.toolName}`);
-    if (details.activities.length > 100) details.activities.shift();
-    return true;
-  }
-
-  if (event.type === "message_end" && event.message?.role === "assistant") {
-    const text = textFromMessage(event.message);
-    if (text) details.output = text;
-    if (event.message.stopReason) details.lastStopReason = event.message.stopReason;
-    const usage = event.message.usage;
-    if (usage) {
-      details.usage.turns++;
-      details.usage.input += usage.input ?? 0;
-      details.usage.output += usage.output ?? 0;
-      details.usage.cacheRead += usage.cacheRead ?? 0;
-      details.usage.cacheWrite += usage.cacheWrite ?? 0;
-      details.usage.cost += usage.cost?.total ?? 0;
-      details.usage.contextTokens = usage.totalTokens ?? details.usage.contextTokens;
-    }
-    return true;
-  }
-
-  if (event.type === "agent_end" && !event.willRetry) {
-    return true;
-  }
-
-  if (event.type === "agent_settled") {
-    details.status = "done";
-    return true;
-  }
-
-  return false;
-}
-
-export function runProcess(
-  command: string,
-  args: string[],
-  options: {
-    cwd: string;
-    timeoutMs: number;
-    signal?: AbortSignal;
-    env?: NodeJS.ProcessEnv;
-    onStdout?: (chunk: string) => void;
-    captureStdout?: boolean;
-  },
-) {
-  return new Promise<{ stdout: string; stderr: string; code: number }>((resolve, reject) => {
-    const proc = spawn(command, args, {
-      cwd: options.cwd,
-      detached: process.platform !== "win32",
-      env: options.env,
-      shell: false,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    let stopped: "timeout" | "aborted" | undefined;
-    let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
-
-    proc.stdout.setEncoding("utf8");
-    proc.stderr.setEncoding("utf8");
-
-    const killTree = (signal: NodeJS.Signals) => {
-      try {
-        if (process.platform === "win32" && proc.pid) {
-          spawnSync("taskkill", ["/PID", String(proc.pid), "/T", ...(signal === "SIGKILL" ? ["/F"] : [])], {
-            stdio: "ignore",
-            windowsHide: true,
-          });
-        } else if (proc.pid) process.kill(-proc.pid, signal);
-        else proc.kill(signal);
-      } catch {
-        proc.kill(signal);
-      }
-    };
-    const stop = (reason: "timeout" | "aborted") => {
-      if (stopped) return;
-      stopped = reason;
-      killTree("SIGTERM");
-      forceKillTimer = setTimeout(() => killTree("SIGKILL"), 5_000);
-    };
-    const onAbort = () => stop("aborted");
-    const timeout = setTimeout(() => stop("timeout"), options.timeoutMs);
-
-    proc.stdout.on("data", (data) => {
-      const chunk = data.toString();
-      if (options.captureStdout !== false) stdout += chunk;
-      options.onStdout?.(chunk);
-    });
-    proc.stderr.on("data", (data) => { stderr += data.toString(); });
-    if (options.signal?.aborted) onAbort();
-    else options.signal?.addEventListener("abort", onAbort, { once: true });
-
-    proc.on("error", (error) => reject(error));
-    proc.on("close", (code) => {
-      clearTimeout(timeout);
-      if (stopped) killTree("SIGKILL");
-      if (forceKillTimer) clearTimeout(forceKillTimer);
-      options.signal?.removeEventListener("abort", onAbort);
-      if (stopped === "timeout") reject(new Error(`Timed out after ${options.timeoutMs / 60_000} minutes`));
-      else if (stopped === "aborted") reject(new DelegationAbortError());
-      else resolve({ stdout, stderr, code: code ?? 1 });
-    });
-  });
-}
-
-async function runDelegatedPi(
-  config: DelegationConfig,
-  task: string,
-  cwd: string,
-  signal?: AbortSignal,
-  onUpdate?: (details: DelegationDetails) => void,
-) {
-  const details = createDelegationDetails(config, task);
-  const startedAt = Date.now();
-  const skills = config.skills ?? [];
-  let buffer = "";
-  let lastUpdate = 0;
-
-  const emit = (force = false) => {
-    details.elapsedMs = Date.now() - startedAt;
-    if (force || Date.now() - lastUpdate >= 100) {
-      lastUpdate = Date.now();
-      onUpdate?.({ ...details, activities: [...details.activities], usage: { ...details.usage } });
-    }
-  };
-  const processLine = (line: string) => {
-    if (!line.trim()) return;
-    try {
-      if (applyDelegationEvent(details, JSON.parse(line))) emit();
-    } catch {
-      // Ignore non-JSON stdout; stderr and exit status still report child failures.
-    }
-  };
-
-  emit(true);
-  const result = await runProcess(
-    "pi",
-    [
-      "--mode", "json",
-      "-p",
-      "--no-session",
-      ...(config.inheritResources ? [] : ["--no-extensions"]),
-      ...(config.inheritResources || skills.includes("*") ? [] : ["--no-skills"]),
-      ...(config.inheritResources ? [] : skills.filter((skill) => skill !== "*").flatMap((skill) => ["--skill", skill])),
-      "--no-prompt-templates",
-      "--model", config.model,
-      "--thinking", config.thinking,
-      ...(config.tools ? ["--tools", config.tools] : []),
-      "--append-system-prompt", config.prompt,
-      `${config.name} task: ${task}`,
-    ],
-    {
-      cwd,
-      timeoutMs: config.timeoutMs,
-      signal,
-      env: { ...process.env, PI_DELEGATED: "1" },
-      captureStdout: false,
-      onStdout(chunk) {
-        buffer += chunk;
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) processLine(line);
-      },
-    },
-  );
-
-  processLine(buffer);
-  details.status = "done";
-  emit(true);
-  if (result.code !== 0) throw new Error(result.stderr.trim() || `Delegated task exited with code ${result.code}`);
-  if (details.lastStopReason && details.lastStopReason !== "stop" && details.lastStopReason !== "toolUse") {
-    throw new Error(`Delegated task ended with stopReason: ${details.lastStopReason}`);
-  }
-  return details;
-}
-
-export function registerDelegatedTool(pi: ExtensionAPI, policy: DelegationPolicy) {
+export function registerDelegatedTool(pi: ExtensionAPI, policy: DelegationPolicy, getManager: () => SubagentManager) {
   const resolveConfig = () => policy.dynamicModel ? policy : getDelegationConfig(policy.key, policy);
   const run = async (
     task: string,
@@ -364,12 +146,40 @@ export function registerDelegatedTool(pi: ExtensionAPI, policy: DelegationPolicy
     onUpdate?: (details: DelegationDetails) => void,
     overrides?: Pick<DelegationConfig, "model" | "thinking">,
   ) => {
-    const details = await runDelegatedPi({ ...resolveConfig(), ...overrides }, task, cwd, signal, onUpdate);
+    const config = { ...resolveConfig(), ...overrides };
+    const manager = getManager();
+    let snapshot;
+    try {
+      snapshot = await manager.spawn({
+        origin: policy.key as "scout" | "review" | "commit" | "agent",
+        title: `${policy.name}: ${task}`,
+        task,
+        cwd,
+        model: config.model,
+        thinking: config.thinking,
+        mutating: policy.mutating,
+        config,
+        consumed: true,
+        signal,
+      });
+    } catch (error) {
+      if (signal?.aborted) throw new DelegationAbortError();
+      throw error;
+    }
+    const emit = () => onUpdate?.(delegationDetails(snapshot, config) as DelegationDetails);
+    const unsubscribe = manager.subscribeTo(snapshot.id, emit);
+    emit();
+    try {
+      await manager.wait([snapshot.id]);
+    } finally {
+      unsubscribe();
+    }
+    if (snapshot.status === "cancelled") throw new DelegationAbortError();
+    if (snapshot.status !== "done") throw new Error(snapshot.error ?? `${policy.name} failed`);
+    const details = delegationDetails(snapshot, config) as DelegationDetails;
     const output = details.output || policy.emptyOutput;
-    const truncated = truncateHead(output, { maxLines: policy.maxLines, maxBytes: policy.maxBytes });
-    details.output = truncated.truncated
-      ? `${truncated.content}\n\n${policy.truncationMessage}`
-      : truncated.content;
+    const truncated = truncateSubagentOutput(output, policy.maxLines, policy.maxBytes, policy.truncationMessage, snapshot.sessionFile);
+    details.output = truncated.output;
     details.truncated = truncated.truncated;
     return details;
   };
@@ -405,11 +215,12 @@ export function registerDelegatedTool(pi: ExtensionAPI, policy: DelegationPolicy
     },
 
     renderCall(args, theme, context) {
-      const config = (context.state.config as DelegationConfig | undefined) ?? {
-        ...resolveConfig(),
-        ...(policy.dynamicModel && typeof (args as any).model === "string" ? { model: (args as any).model } : {}),
-        ...(policy.dynamicModel && typeof (args as any).thinking === "string" ? { thinking: (args as any).thinking } : {}),
-      };
+      const cached = context.state.config as DelegationConfig | undefined;
+      const config = policy.dynamicModel ? {
+        ...(cached ?? resolveConfig()),
+        ...(typeof (args as any).model === "string" ? { model: (args as any).model } : {}),
+        ...(typeof (args as any).thinking === "string" ? { thinking: (args as any).thinking } : {}),
+      } : cached ?? resolveConfig();
       context.state.config = config;
       return renderDelegationCall(config, args.task, context.expanded, theme);
     },
