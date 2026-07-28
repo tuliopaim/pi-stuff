@@ -229,3 +229,23 @@ test("model-facing management tools reject TUI-only /btw sessions", async () => 
   const listed = await tools.get("subagent_list").execute("call", {});
   assert.equal(listed.content[0].text, "No subagents.");
 });
+
+test("subagent_wait caps combined output across many agents", async () => {
+  const tools = new Map<string, any>();
+  const events = new Map<string, any>();
+  const snapshots = Array.from({ length: 8 }, (_, index) => ({
+    id: `sa_${index}`, origin: "generic", title: `agent ${index}`, status: "done", output: "x".repeat(16 * 1024), consumed: false,
+  }));
+  const manager: any = {
+    list: () => snapshots, get: (id: string) => snapshots.find((entry) => entry.id === id), subscribe: () => () => {}, shutdown: async () => {},
+    wait: async () => snapshots, consume: () => {},
+  };
+  registerDelegation({
+    registerTool(tool: any) { tools.set(tool.name, tool); }, registerCommand() {}, registerMessageRenderer() {}, registerEntryRenderer() {},
+    on(name: string, handler: any) { events.set(name, handler); },
+  } as any, () => manager);
+  events.get("session_start")({}, { hasUI: false, ui: { setStatus() {}, notify() {} }, sessionManager: { getSessionId: () => "parent" } });
+  const result = await tools.get("subagent_wait").execute("call", { ids: snapshots.map((entry) => entry.id) });
+  assert.match(result.content[0].text, /combined subagent output truncated/);
+  assert.ok(Buffer.byteLength(result.content[0].text) < 70 * 1024);
+});

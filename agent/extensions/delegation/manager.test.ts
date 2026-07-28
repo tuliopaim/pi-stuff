@@ -143,12 +143,14 @@ test("mutation lock covers subdirectories and symlink aliases of one worktree", 
   } finally { rmSync(root, { recursive: true, force: true }); rmSync(alias, { force: true }); }
 });
 
-test("timed-out abort keeps the mutation lock until the child actually stops", async () => {
-  const { manager } = harness({ pending: true, stuckAbort: true });
+test("hung abort force-disposes the child and releases its mutation lock", async () => {
+  const { manager, sessions } = harness({ pending: true, stuckAbort: true });
   const first = await manager.spawn(spawnOptions({ mutating: true }));
   await manager.cancel([first.id]);
   assert.equal(first.status, "cancelled");
-  await assert.rejects(manager.spawn(spawnOptions({ mutating: true })), /mutating subagent/);
+  assert.match(first.error ?? "", /force-disposed/);
+  assert.equal(sessions[0].disposed, true);
+  await manager.spawn(spawnOptions({ mutating: true }));
   await manager.shutdown();
 });
 
@@ -161,6 +163,17 @@ test("cancel settles once and follow-up restarts a settled session", async () =>
   await manager.send(snapshot.id, "continue");
   await manager.cancel([snapshot.id]);
   assert.equal(snapshot.status, "cancelled");
+  await manager.shutdown();
+});
+
+test("continuing a consumed generic subagent makes the new result deliverable", async () => {
+  const settled: boolean[] = [];
+  const { manager } = harness({ onSettled: (snapshot) => settled.push(snapshot.consumed) });
+  const snapshot = await manager.spawn(spawnOptions({ consumed: true }));
+  await manager.wait([snapshot.id]);
+  await manager.send(snapshot.id, "continue");
+  while (snapshot.status === "running") await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(settled, [true, false]);
   await manager.shutdown();
 });
 
@@ -441,4 +454,20 @@ test("takeover sends follow-ups and exposes an explicit abort action", async () 
 test("takeover text strips terminal controls and normalizes tabs", () => {
   assert.equal(sanitizeTerminalText("ok\x1b[31mred\x1b[0m\tcol\r\nnext\u0007"), "okred    col\nnext");
   assert.equal(sanitizeTerminalText("\x1b]0;owned\x07safe"), "safe");
+});
+
+test("takeover renders failure details and recent tool activity", () => {
+  const snapshot: any = {
+    id: "sa_failed", title: "failed agent", status: "failed", error: "model failed", activities: ["read src/a.ts", "✗ bash"],
+    createdAt: Date.now(), settledAt: Date.now(), model: "test/model", thinking: "high", transcript: [], liveThinking: "", liveText: "", queued: [],
+  };
+  const manager: any = { subscribeTo: () => () => {}, get: () => snapshot };
+  const tui: any = { terminal: { rows: 30 }, requestRender() {} };
+  const theme: any = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+  const takeover = new Takeover(tui, theme, { matches: () => false } as any, manager, snapshot.id, () => {});
+  const rendered = takeover.render(100).join("\n");
+  assert.match(rendered, /RECENT ACTIVITY/);
+  assert.match(rendered, /read src\/a\.ts/);
+  assert.match(rendered, /ERROR: model failed/);
+  takeover.dispose();
 });

@@ -73,6 +73,7 @@ interface Entry {
   workspace: string;
   removeExternalAbort?: () => void;
   pendingSteers?: string[];
+  abortPromise?: Promise<void>;
 }
 
 interface PersistedRegistry {
@@ -287,6 +288,31 @@ export class SubagentManager {
     entry.removeExternalAbort = undefined;
   }
 
+  private abortAfterSignal(entry: Entry) {
+    if (entry.abortPromise) return entry.abortPromise;
+    entry.abortPromise = (async () => {
+      const snapshot = entry.snapshot;
+      const reason = errorText(entry.controller?.signal.reason ?? "Cancelled");
+      const timedOut = reason.startsWith("Timed out after");
+      const stopped = entry.session ? await stopSession(entry.session, this.abortTimeoutMs) : true;
+      if (!stopped && entry.session) {
+        this.settle(entry, timedOut ? "failed" : "cancelled", `${reason}; abort deadline exceeded, session was force-disposed`);
+        entry.runFiber?.interruptUnsafe();
+        entry.setupFiber?.interruptUnsafe();
+        try { entry.session.dispose(); } catch {}
+        entry.session = undefined;
+        entry.active = false;
+        this.finishLifecycle(entry);
+        await Effect.runPromise(Scope.close(entry.scope, Exit.void).pipe(Effect.timeout(this.abortTimeoutMs), Effect.ignore));
+        this.notify(snapshot.id);
+        this.prune();
+      } else if (snapshot.status === "running") {
+        this.settle(entry, timedOut ? "failed" : "cancelled", reason);
+      }
+    })().finally(() => { entry.abortPromise = undefined; });
+    return entry.abortPromise;
+  }
+
   async spawn(options: SpawnOptions) {
     if (this.disposed) throw new Error("Subagent manager is shutting down.");
     this.assertSafe(options.cwd, options.mutating);
@@ -454,17 +480,7 @@ export class SubagentManager {
     entry.controller = controller;
     entry.deadlineAt ??= Date.now() + entry.config.timeoutMs;
     const timedOut = () => errorText(controller.signal.reason ?? "").startsWith("Timed out after");
-    const onAbort = () => {
-      Effect.runFork(promiseEffect(stopSession(session, this.abortTimeoutMs)).pipe(
-        Effect.tap((stopped) => Effect.sync(() => {
-          if (snapshot.status === "running") this.settle(entry, timedOut() ? "failed" : "cancelled", errorText(controller.signal.reason ?? "Cancelled"));
-          // If abort could not stop the SDK session, run remains active and keeps
-          // its workspace lock until prompt really exits.
-          if (!stopped) this.notify(snapshot.id);
-        })),
-        Effect.ignore,
-      ));
-    };
+    const onAbort = () => { void this.abortAfterSignal(entry); };
     controller.signal.addEventListener("abort", onAbort, { once: true });
     entry.timeoutFiber = Effect.runSync(Effect.forkIn(
       Effect.sleep(Math.max(0, entry.deadlineAt - Date.now())).pipe(Effect.tap(() => Effect.sync(() => {
@@ -536,7 +552,7 @@ export class SubagentManager {
       this.consume(id);
       if (entry.snapshot.status === "running") {
         entry.controller?.abort(new Error("Cancelled"));
-        if (entry.session) await Effect.runPromise(promiseEffect(stopSession(entry.session, this.abortTimeoutMs)));
+        await this.abortAfterSignal(entry);
         if (entry.snapshot.status === "running") this.settle(entry, "cancelled", "Cancelled");
       }
       snapshots.push(entry.snapshot);
@@ -562,6 +578,7 @@ export class SubagentManager {
     if (entry.snapshot.restored && !entry.session && !entry.snapshot.sessionFile) throw new Error(`Cannot continue restored subagent ${id}: child session state is unavailable.`);
     this.assertSafe(entry.snapshot.cwd, entry.snapshot.mutating, id);
     entry.completion = Deferred.makeUnsafe();
+    if (entry.snapshot.origin === "generic") entry.snapshot.consumed = false;
     entry.snapshot.status = "running"; entry.snapshot.settledAt = undefined; entry.snapshot.error = undefined;
     entry.snapshot.output = ""; entry.snapshot.liveText = ""; entry.snapshot.liveThinking = ""; entry.snapshot.queued = [];
     entry.reserved = true; this.reserved++; this.notify(id);

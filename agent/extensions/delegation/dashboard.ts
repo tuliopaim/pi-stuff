@@ -84,7 +84,12 @@ function transcriptLines(snapshot: SubagentSnapshot, width: number, theme: Theme
   }
   if (snapshot.liveThinking) lines.push(...wrapTextWithAnsi(theme.fg("dim", sanitizeTerminalText(snapshot.liveThinking)), width));
   if (snapshot.liveText) lines.push(...wrapTextWithAnsi(sanitizeTerminalText(snapshot.liveText), width));
+  if (snapshot.activities.length) {
+    lines.push(theme.fg("accent", "RECENT ACTIVITY"));
+    for (const activity of snapshot.activities.slice(-5)) lines.push(...wrapTextWithAnsi(theme.fg("dim", sanitizeTerminalText(activity)), width));
+  }
   for (const queued of snapshot.queued) lines.push(theme.fg("warning", `[queued ${queued.kind}] ${sanitizeTerminalText(queued.text)}`));
+  if (snapshot.error) lines.push(...wrapTextWithAnsi(theme.fg("error", `ERROR: ${sanitizeTerminalText(snapshot.error)}`), width));
   return lines;
 }
 

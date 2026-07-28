@@ -340,7 +340,8 @@ export default function (
       onUpdate?.({ content: [{ type: "text", text: `Waiting for ${ids.join(", ")}…` }], details: { pending: ids } });
       const snapshots = await getManager().wait(ids, signal);
       for (const id of ids) { getManager().consume(id); pendingResults.delete(id); }
-      const text = snapshots.map((snapshot) => `## ${snapshot.id} “${snapshot.title}” — ${snapshot.status}\n${snapshot.error ? `Error: ${snapshot.error}\n` : ""}${truncateSubagentOutput(snapshot.output || "(no output)", 200, 16 * 1024, "[output truncated]", snapshot.sessionFile).output}`).join("\n\n---\n\n");
+      const combined = snapshots.map((snapshot) => `## ${snapshot.id} “${snapshot.title}” — ${snapshot.status}\n${snapshot.error ? `Error: ${snapshot.error}\n` : ""}${truncateSubagentOutput(snapshot.output || "(no output)", 200, 16 * 1024, "[output truncated]", snapshot.sessionFile).output}`).join("\n\n---\n\n");
+      const text = truncateSubagentOutput(combined, 800, 64 * 1024, "[combined subagent output truncated]").output;
       return { content: [{ type: "text", text }], details: { results: snapshots.map(({ id, status }) => ({ id, status })) } };
     },
   });
