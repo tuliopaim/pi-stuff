@@ -98,15 +98,16 @@ export interface WorkflowDetails {
 
 /** Colored square state indicator (no emojis/glyphs). */
 export const SQUARE = "■";
+const DONE_SQUARE = `\x1b[32m${SQUARE}\x1b[39m`;
 
 export function stateSquare(state: AgentState, theme: Theme): string {
-  if (state === "done") return theme.fg("success", SQUARE);
+  if (state === "done") return DONE_SQUARE;
   if (state === "error") return theme.fg("error", SQUARE);
   return theme.fg("warning", SQUARE);
 }
 
 export function statusSquare(status: WorkflowStatus, theme: Theme): string {
-  if (status === "completed") return theme.fg("success", SQUARE);
+  if (status === "completed") return DONE_SQUARE;
   if (status === "running") return theme.fg("warning", SQUARE);
   return theme.fg("error", SQUARE);
 }

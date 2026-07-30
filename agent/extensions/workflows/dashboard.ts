@@ -36,6 +36,7 @@ import {
   resultJson,
   shortenHome,
   stateSquare,
+  statusSquare,
   statusColor,
   statusWord,
   SQUARE,
@@ -1020,7 +1021,7 @@ function transcriptColor(
 }
 
 function statusSquareFor(details: WorkflowDetails, theme: Theme): string {
-  return theme.fg(statusColor(details.status), SQUARE);
+  return statusSquare(details.status, theme);
 }
 
 function groupSquare(group: PhaseGroup, theme: Theme): string {
@@ -1029,7 +1030,7 @@ function groupSquare(group: PhaseGroup, theme: Theme): string {
     return theme.fg("warning", SQUARE);
   if (group.agents.some((a) => a.state === "error"))
     return theme.fg("error", SQUARE);
-  return theme.fg("success", SQUARE);
+  return stateSquare("done", theme);
 }
 
 /** Open the dashboard as a full-screen overlay. */

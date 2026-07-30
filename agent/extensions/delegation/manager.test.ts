@@ -456,10 +456,41 @@ test("takeover text strips terminal controls and normalizes tabs", () => {
   assert.equal(sanitizeTerminalText("\x1b]0;owned\x07safe"), "safe");
 });
 
+test("takeover supports vim log navigation without stealing input mode", () => {
+  let closed = false;
+  const snapshot: any = {
+    id: "sa_vim", title: "vim agent", status: "running", createdAt: Date.now(), model: "test/model", thinking: "high",
+    transcript: [], liveThinking: "", liveText: "", queued: [], activities: [], usage: { contextTokens: 12_000, contextWindow: 272_000 },
+  };
+  const takeover = new Takeover(
+    { terminal: { rows: 30 }, requestRender() {} } as any,
+    { fg: (_color: string, text: string) => text, bold: (text: string) => text } as any,
+    { matches: () => false } as any,
+    { subscribeTo: () => () => {}, get: () => snapshot } as any,
+    snapshot.id,
+    () => { closed = true; },
+  );
+
+  takeover.handleInput("k");
+  assert.equal((takeover as any).offset, 6);
+  takeover.handleInput("G");
+  assert.equal((takeover as any).offset, 0);
+  takeover.handleInput("g");
+  assert.equal((takeover as any).offset, Number.MAX_SAFE_INTEGER);
+  takeover.handleInput("l");
+  takeover.handleInput("j");
+  assert.equal((takeover as any).input.getValue(), "j");
+  (takeover as any).inputMode = false;
+  takeover.handleInput("h");
+  assert.equal(closed, true);
+  takeover.dispose();
+});
+
 test("takeover renders failure details and recent tool activity", () => {
   const snapshot: any = {
     id: "sa_failed", title: "failed agent", status: "failed", error: "model failed", activities: ["read src/a.ts", "✗ bash"],
     createdAt: Date.now(), settledAt: Date.now(), model: "test/model", thinking: "high", transcript: [], liveThinking: "", liveText: "", queued: [],
+    usage: { contextTokens: 12_000, contextWindow: 272_000 },
   };
   const manager: any = { subscribeTo: () => () => {}, get: () => snapshot };
   const tui: any = { terminal: { rows: 30 }, requestRender() {} };
@@ -469,5 +500,6 @@ test("takeover renders failure details and recent tool activity", () => {
   assert.match(rendered, /RECENT ACTIVITY/);
   assert.match(rendered, /read src\/a\.ts/);
   assert.match(rendered, /ERROR: model failed/);
+  assert.match(rendered, /4%\/272k/);
   takeover.dispose();
 });

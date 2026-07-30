@@ -2,6 +2,7 @@ import type { ExtensionCommandContext, KeybindingsManager } from "@earendil-work
 import { Input, truncateToWidth, wrapTextWithAnsi, type Component, type Focusable, type TUI } from "@earendil-works/pi-tui";
 import type { SubagentManager } from "./manager.ts";
 import type { SubagentSnapshot } from "./domain.ts";
+import { formatContextUtilization } from "../shared/context-utilization.ts";
 
 type Theme = ExtensionCommandContext["ui"]["theme"];
 
@@ -49,10 +50,12 @@ class Dashboard implements Component {
   handleInput(data: string) {
     const entries = this.manager.list();
     reconcileDashboardSelection(this.selection, entries);
-    if (this.keys.matches(data, "tui.select.cancel")) return this.done(null);
-    if (this.keys.matches(data, "tui.select.confirm")) return this.done(entries[this.selection.index]?.id ?? null);
+    if (this.keys.matches(data, "tui.select.cancel") || this.keys.matches(data, "tui.editor.cursorLeft") || data === "h") return this.done(null);
+    if (this.keys.matches(data, "tui.select.confirm") || this.keys.matches(data, "tui.editor.cursorRight") || data === "l") return this.done(entries[this.selection.index]?.id ?? null);
     if (this.keys.matches(data, "tui.select.up") || data === "k") this.selection.index = (this.selection.index - 1 + entries.length) % Math.max(1, entries.length);
     if (this.keys.matches(data, "tui.select.down") || data === "j") this.selection.index = (this.selection.index + 1) % Math.max(1, entries.length);
+    if (data === "g") this.selection.index = 0;
+    if (data === "G") this.selection.index = Math.max(0, entries.length - 1);
     if (data === "x") { const selected = entries[this.selection.index]; if (selected?.status === "running") void this.manager.cancel([selected.id]); }
     this.selection.id = entries[this.selection.index]?.id;
     this.tui.requestRender();
@@ -65,11 +68,11 @@ class Dashboard implements Component {
     const lines = [this.theme.bold(this.theme.fg("accent", `Subagents · ${entries.length}`)), this.theme.fg("border", "─".repeat(width))];
     for (const [offset, entry] of entries.slice(start, start + height).entries()) {
       const marker = start + offset === this.selection.index ? this.theme.fg("accent", "❯") : " ";
-      const context = entry.usage.contextWindow ? `${Math.round(entry.usage.contextTokens / entry.usage.contextWindow * 100)}%` : `${entry.usage.contextTokens} tok`;
+      const context = formatContextUtilization({ tokens: entry.usage.contextTokens, contextWindow: entry.usage.contextWindow }) || `${entry.usage.contextTokens} tok`;
       lines.push(truncateToWidth(`${marker} ${square(entry, this.theme)} ${sanitizeTerminalText(entry.title)} ${this.theme.fg("dim", sanitizeTerminalText(`${entry.id} · ${entry.origin} · ${entry.model}:${entry.thinking} · ${context} · ${elapsed(entry)} · ${entry.cwd}${entry.restored ? " · restored" : ""}`))}`, width));
     }
     while (lines.length < height + 2) lines.push("");
-    lines.push(this.theme.fg("dim", "j/k select · enter inspect · x abort · esc close"));
+    lines.push(this.theme.fg("dim", "j/k select · g/G first/last · l/enter inspect · h/esc close · x abort"));
     return lines.map((line) => truncateToWidth(line, width));
   }
 }
@@ -107,8 +110,9 @@ export class Takeover implements Component, Focusable {
   private id: string;
   private done: () => void;
   private sendError?: string;
+  private inputMode = false;
   get focused() { return this._focused; }
-  set focused(value: boolean) { this._focused = value; this.input.focused = value; }
+  set focused(value: boolean) { this._focused = value; this.input.focused = value && this.inputMode; }
   constructor(tui: TUI, theme: Theme, keys: KeybindingsManager, manager: SubagentManager, id: string, done: () => void) {
     this.tui = tui; this.theme = theme; this.keys = keys; this.manager = manager; this.id = id; this.done = done;
     this.unsubscribe = manager.subscribeTo(id, () => {
@@ -118,37 +122,52 @@ export class Takeover implements Component, Focusable {
     this.input.onSubmit = (value) => {
       const text = value.trim();
       if (!text) return;
-      this.input.setValue(""); this.offset = 0; this.sendError = undefined;
+      this.input.setValue(""); this.inputMode = false; this.input.focused = false; this.offset = 0; this.sendError = undefined;
       void manager.send(id, text).catch((error) => { this.sendError = error instanceof Error ? error.message : String(error); this.tui.requestRender(); });
     };
   }
   dispose() { this.unsubscribe(); clearInterval(this.timer); if (this.renderTimer) clearTimeout(this.renderTimer); }
   invalidate() { this.input.invalidate(); }
   handleInput(data: string) {
-    if (this.keys.matches(data, "tui.select.cancel") || this.keys.matches(data, "app.interrupt")) return this.done();
     if (this.keys.matches(data, "app.clear")) { const snapshot = this.manager.get(this.id); if (snapshot?.status === "running") void this.manager.cancel([this.id]); return; }
-    if (this.keys.matches(data, "tui.editor.cursorUp")) { this.offset += 6; this.tui.requestRender(); return; }
-    if (this.keys.matches(data, "tui.editor.cursorDown")) { this.offset = Math.max(0, this.offset - 6); this.tui.requestRender(); return; }
-    this.input.handleInput(data); this.tui.requestRender();
+    if (this.inputMode) {
+      if (this.keys.matches(data, "tui.select.cancel")) { this.inputMode = false; this.input.focused = false; this.tui.requestRender(); return; }
+      this.input.handleInput(data); this.tui.requestRender(); return;
+    }
+    if (this.keys.matches(data, "tui.select.cancel") || this.keys.matches(data, "app.interrupt") || this.keys.matches(data, "tui.editor.cursorLeft") || data === "h") return this.done();
+    if (this.keys.matches(data, "tui.select.confirm") || this.keys.matches(data, "tui.editor.cursorRight") || data === "l" || data === "i") {
+      this.inputMode = true; this.input.focused = this._focused; this.tui.requestRender(); return;
+    }
+    if (this.keys.matches(data, "tui.editor.cursorUp") || data === "k") { this.offset += 6; this.tui.requestRender(); return; }
+    if (this.keys.matches(data, "tui.editor.cursorDown") || data === "j") { this.offset = Math.max(0, this.offset - 6); this.tui.requestRender(); return; }
+    if (this.keys.matches(data, "tui.editor.pageUp")) { this.offset += this.viewportHeight(); this.tui.requestRender(); return; }
+    if (this.keys.matches(data, "tui.editor.pageDown")) { this.offset = Math.max(0, this.offset - this.viewportHeight()); this.tui.requestRender(); return; }
+    if (data === "g") { this.offset = Number.MAX_SAFE_INTEGER; this.tui.requestRender(); return; }
+    if (data === "G") { this.offset = 0; this.tui.requestRender(); return; }
+    if (data.length === 1 && data >= " ") { this.inputMode = true; this.input.focused = this._focused; this.input.handleInput(data); this.tui.requestRender(); }
   }
+  private viewportHeight() { return Math.max(6, (this.tui.terminal.rows || 30) - 8); }
   render(width: number) {
     const snapshot = this.manager.get(this.id);
     if (!snapshot) return ["Subagent no longer tracked"];
-    const viewport = Math.max(6, (this.tui.terminal.rows || 30) - 8);
+    const viewport = this.viewportHeight();
     const transcript = transcriptLines(snapshot, width, this.theme);
+    const context = formatContextUtilization({ tokens: snapshot.usage.contextTokens, contextWindow: snapshot.usage.contextWindow });
     this.offset = Math.min(this.offset, Math.max(0, transcript.length - viewport));
     const end = transcript.length - this.offset;
     const body = transcript.slice(Math.max(0, end - viewport), end);
     while (body.length < viewport) body.unshift("");
     return [
       this.theme.fg("borderAccent", "─".repeat(width)),
-      truncateToWidth(`${square(snapshot, this.theme)} ${this.theme.bold(sanitizeTerminalText(snapshot.title))} · ${sanitizeTerminalText(`${snapshot.id} · ${snapshot.status} · ${elapsed(snapshot)} · ${snapshot.model}:${snapshot.thinking}`)}`, width),
+      truncateToWidth(`${square(snapshot, this.theme)} ${this.theme.bold(sanitizeTerminalText(snapshot.title))} · ${sanitizeTerminalText(`${snapshot.id} · ${snapshot.status} · ${elapsed(snapshot)} · ${snapshot.model}:${snapshot.thinking}${context ? ` · ${context}` : ""}`)}`, width),
       this.theme.fg("borderAccent", "─".repeat(width)),
       ...body.map((line) => truncateToWidth(line, width)),
       this.theme.fg("borderAccent", "─".repeat(width)),
       ...this.input.render(width),
       ...(this.sendError ? [truncateToWidth(this.theme.fg("error", sanitizeTerminalText(this.sendError)), width)] : []),
-      this.theme.fg("dim", "enter send/continue · esc back · ctrl+l abort · up/down scroll"),
+      this.theme.fg("dim", this.inputMode
+        ? "INPUT · enter send/continue · esc navigate"
+        : "NAV · j/k scroll · g/G top/bottom · pgup/pgdn page · i/l/enter input · h/esc back · ctrl+l abort"),
     ];
   }
 }
