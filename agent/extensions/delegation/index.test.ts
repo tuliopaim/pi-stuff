@@ -22,8 +22,28 @@ function registrationHarness() {
   return { tools, commands, events, renderers, entries };
 }
 
+function withAgentEnabled<T>(run: () => T): T {
+  const dir = mkdtempSync(join(tmpdir(), "pi-delegation-enabled-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  try {
+    writeFileSync(join(dir, "settings.json"), JSON.stringify({
+      subagents: { preset: "test", presets: { test: {
+        agent: { model: "opencode-go/kimi-k2.7-code", thinking: "high", routes: [] },
+      } } },
+    }));
+    process.env.PI_CODING_AGENT_DIR = dir;
+    setSubagentPreset(undefined);
+    return run();
+  } finally {
+    setSubagentPreset(undefined);
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 test("registers existing and persistent subagent APIs", () => {
-  const registered = registrationHarness();
+  const registered = withAgentEnabled(registrationHarness);
   assert.deepEqual(registered.tools, [
     "scout", "review", "commit", "agent",
     "subagent_spawn", "subagent_wait", "subagent_cancel", "subagent_check", "subagent_list",
@@ -37,9 +57,9 @@ test("registers existing and persistent subagent APIs", () => {
 
 test("model guidance scales delegation by independent workstreams", () => {
   const tools = new Map<string, any>();
-  registerDelegation({
-    registerTool(tool: any) { tools.set(tool.name, tool); }, registerCommand() {}, registerMessageRenderer() {}, registerEntryRenderer() {}, on() {},
-  } as any);
+  withAgentEnabled(() => registerDelegation({
+      registerTool(tool: any) { tools.set(tool.name, tool); }, registerCommand() {}, registerMessageRenderer() {}, registerEntryRenderer() {}, on() {},
+    } as any));
   assert.match(tools.get("scout").promptGuidelines.join("\n"), /Use one scout by default/);
   assert.match(tools.get("agent").promptGuidelines.join("\n"), /default to zero for clear local work/);
   assert.match(tools.get("agent").promptGuidelines.join("\n"), /Do not split connected implementation/);
@@ -51,10 +71,10 @@ test("model guidance scales delegation by independent workstreams", () => {
 
 test("agent renderer replaces its Kimi default when streamed arguments select Sol", () => {
   let agentTool: any;
-  registerDelegation({
-    registerTool(tool: any) { if (tool.name === "agent") agentTool = tool; },
-    registerCommand() {}, registerMessageRenderer() {}, registerEntryRenderer() {}, on() {},
-  } as any);
+  withAgentEnabled(() => registerDelegation({
+      registerTool(tool: any) { if (tool.name === "agent") agentTool = tool; },
+      registerCommand() {}, registerMessageRenderer() {}, registerEntryRenderer() {}, on() {},
+    } as any));
   const context: any = { state: {}, expanded: false };
   const theme: any = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
   agentTool.renderCall({ task: "review this" }, theme, context);

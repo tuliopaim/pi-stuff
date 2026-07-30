@@ -87,6 +87,14 @@ It updates during generation and shows:
 
 ## Multi-agent workflows
 
+Generic agents and workflows are dormant by default. Enable them for one task with:
+
+```text
+/delegate Add organization-level API tokens
+```
+
+The `agent`, `subagent_*`, and `workflow` tools are removed again when that run settles. The focused `scout`, `review`, and `commit` tools remain available normally.
+
 The `workflow` tool is for substantial tasks that need parallel research, phased implementation, or independent synthesis. It runs a task-specific JavaScript orchestration script with four primitives:
 
 - `phase(title)` — updates the visible phase
