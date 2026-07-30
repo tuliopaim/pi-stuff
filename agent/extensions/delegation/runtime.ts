@@ -63,6 +63,62 @@ export function getDelegationConfig(name: string, defaults: DelegationConfig): D
   };
 }
 
+export interface AgentRoute {
+  readonly model: string;
+  readonly thinking: string;
+  readonly guidance: string;
+}
+
+/** Route validation result. */
+export interface RouteValidation {
+  allowed: boolean;
+  error?: string;
+}
+
+export function getAgentRoutes(): AgentRoute[] {
+  const presetName = getActiveSubagentPresetName();
+  if (!presetName) return [];
+
+  const routes = subagentSettings()?.presets?.[presetName]?.agent?.routes;
+  if (!Array.isArray(routes) || routes.length === 0) return [];
+
+  for (let i = 0; i < routes.length; i++) {
+    const r = routes[i];
+    if (typeof r.model !== "string" || typeof r.thinking !== "string" || typeof r.guidance !== "string") {
+      throw new Error(
+        `Subagent preset "${presetName}" agent.routes[${i}] is invalid: need model, thinking, and guidance strings`
+      );
+    }
+    if (!THINKING_LEVELS.has(r.thinking)) {
+      throw new Error(
+        `Subagent preset "${presetName}" agent.routes[${i}] has invalid thinking level "${r.thinking}"`
+      );
+    }
+  }
+
+  return routes as AgentRoute[];
+}
+
+export function validateRoute(model: string, thinking: string): RouteValidation {
+  const routes = getAgentRoutes();
+  if (routes.length === 0) return { allowed: true }; // no routes configured = unrestricted
+
+  const match = routes.find((r) => r.model === model && r.thinking === thinking);
+  if (match) return { allowed: true };
+
+  const formatted = routes.map((r) => `  ${r.model}:${r.thinking} — ${r.guidance}`).join("\n");
+  return {
+    allowed: false,
+    error: `"${model}:${thinking}" is not in the active preset routes.\nAvailable routes:\n${formatted}`,
+  };
+}
+
+export function formatRouteGuidance(): string {
+  const routes = getAgentRoutes();
+  if (routes.length === 0) return "";
+  return routes.map((r) => `${r.model}:${r.thinking} — ${r.guidance}`).join("\n");
+}
+
 export interface DelegationConfig {
   readonly name: string;
   readonly model: string;
@@ -199,8 +255,12 @@ export function registerDelegatedTool(pi: ExtensionAPI, policy: DelegationPolicy
       : Type.Object({ task: Type.String({ description: policy.parameter }) }),
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      if (policy.dynamicModel && !THINKING_LEVELS.has((params as any).thinking)) {
-        throw new Error(`Invalid thinking level: ${(params as any).thinking}`);
+      if (policy.dynamicModel) {
+        if (!THINKING_LEVELS.has((params as any).thinking)) {
+          throw new Error(`Invalid thinking level: ${(params as any).thinking}`);
+        }
+        const v = validateRoute((params as any).model, (params as any).thinking);
+        if (!v.allowed) throw new Error(v.error);
       }
       const overrides = policy.dynamicModel
         ? { model: (params as any).model, thinking: (params as any).thinking }

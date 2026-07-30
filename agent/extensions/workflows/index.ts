@@ -34,6 +34,7 @@ import {
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { formatActivityStatus } from "../shared/activity-status.ts";
+import { formatRouteGuidance, validateRoute as validateSubagentRoute } from "../delegation/runtime.ts";
 import { createWorkflowPersistence, persistWorkflowJson } from "./artifacts.ts";
 import { RunController } from "./controller.ts";
 import { sessionWorkflowRunIds, showWorkflowDashboard } from "./dashboard.ts";
@@ -61,12 +62,12 @@ import {
 import {
   buildBackgroundWorkflowFollowUp,
   buildBackgroundWorkflowLaunchResult,
+  buildPromptGuidelines,
+  buildToolDescription,
   buildWorkflowAgentPrompt,
   buildWorkflowResultMessage,
   WORKFLOW_PARAMETER_DESCRIPTIONS,
-  WORKFLOW_PROMPT_GUIDELINES,
   WORKFLOW_PROMPT_SNIPPET,
-  WORKFLOW_TOOL_DESCRIPTION,
 } from "./prompt.ts";
 import {
   createWorkflowResources,
@@ -376,12 +377,15 @@ export default function workflows(pi: ExtensionAPI) {
     },
   });
 
+  const routesText = formatRouteGuidance();
+  const toolDescription = buildToolDescription(routesText);
+  const toolGuidelines = buildPromptGuidelines(routesText);
   pi.registerTool({
     name: "workflow",
     label: "Workflow",
-    description: WORKFLOW_TOOL_DESCRIPTION,
+    description: toolDescription,
     promptSnippet: WORKFLOW_PROMPT_SNIPPET,
-    promptGuidelines: WORKFLOW_PROMPT_GUIDELINES,
+    promptGuidelines: toolGuidelines,
     parameters: WorkflowParams,
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -561,6 +565,12 @@ export default function workflows(pi: ExtensionAPI) {
             emit();
 
             const thinkingLevel = opts.effort as ThinkingLevel;
+
+            // Check active preset routes if configured
+            {
+              const v = validateSubagentRoute(modelOpt, thinkingLevel);
+              if (!v.allowed) return fail(`agent "${label}": ${v.error}`);
+            }
 
             const resources = await getResources(opts.schema !== undefined);
             const outcome = await runAgent({

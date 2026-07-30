@@ -16,46 +16,62 @@ export const WORKFLOW_PARAMETER_DESCRIPTIONS = {
 };
 
 /** Defines the workflow DSL, constraints, reliability guidance, and model-authored task examples. */
-export const WORKFLOW_TOOL_DESCRIPTION = [
-  "Use the workflow tool when the user explicitly requests a workflow, or when a substantial task has at least two independent workstreams or real phase dependencies that materially benefit from orchestration.",
-  "Run a multi-agent workflow from a JavaScript orchestration script you write inline. Subagents have separate model contexts but share the working tree. Suitable shapes include read-only research fan-out, per-file review, and reconnaissance-then-implementation pipelines.",
-  "The script runs as an async function body with these primitives:",
-  "• export const meta = { name, description, phases: [{ title, detail? }] } — metadata for the progress UI. Declare all phases up front.",
-  "• phase(title) — mark the current phase at runtime (use titles from meta.phases).",
-  "• await agent(prompt, { model, effort, label?, phase?, schema?, provider?, optional? }) — run ONE subagent in an isolated context and wait for it. `model` and `effort` are required; omission fails before any provider request. Use an exact `provider/model-id`, or pass `provider` separately. `effort` is off|minimal|low|medium|high|xhigh|max. Agents are required by default: after one fails, later agents are blocked and the workflow fails. Set `optional: true` only for planned best-effort read-only work whose absence does not invalidate later phases. Always resolves to { ok, output, structured?, error? }; check `ok`. With a JSON `schema`, `structured` holds the validated object. Children receive normal built-ins and trust-appropriate extensions, settings, skills, and AGENTS.md context, but cannot recursively orchestrate or ask the user.",
-  "• await parallel([() => agent(...), () => agent(...)], { concurrency? }) — run zero-argument agent thunks concurrently and return results in order. Concurrency is globally capped at 4 for the run.",
-  "• args — the parsed value of the `args` tool parameter (or undefined).",
-  "Workflow JavaScript runs in a restricted, killable child with no imports, eval, timers, filesystem, network, or process APIs. A run may make at most 32 agent calls and has no overall deadline. Each agent must receive its first assistant response event within 45 seconds so silent provider requests fail clearly; after that, agent() has no wall-clock deadline. Each individual child tool call times out independently after 3 minutes, becomes an error tool result, and leaves the agent loop free to recover. Use map/filter/if/await/template strings to orchestrate, and `return` a JSON-serializable aggregate.",
-  "Model policy: reconnaissance/routine read-only checks use opencode-go/deepseek-v4-flash at medium; implementation/integration use opencode-go/kimi-k2.7-code at high; planning and consequential adversarial/final review may use openai-codex/gpt-5.6-sol at high. Never use Sol for reconnaissance, routine implementation, or report formatting. Keep reconnaissance bounded and reserve scarce premium quota for judgment.",
-  "Required-result policy: the runtime blocks later agents after a required failure. Do not retry failed calls inside the workflow by default. Let the workflow fail so the parent orchestrator can inspect the error and decide whether to retry, narrow/split the assignment, or change models. Never repeat an unchanged timeout, start a dependent or premium phase with missing findings, or automatically retry mutating agents.",
-  "Pass a `schema` to agent() whenever a later step branches on the result, so you get typed fields instead of prose. If an agent returns prose without calling structured_output, the runner gives it one same-session correction attempt before failing. There is no workflow resume. Artifacts are saved under ~/.pi/agent/workflows/<runId>/ for inspection.",
-  "Example:",
-  "export const meta = { name: 'reliability-review', description: 'Review modules for reliability risks, then report', phases: [{ title: 'Scan' }, { title: 'Report' }] }",
-  "const FINDINGS = { type: 'object', properties: { issues: { type: 'array', items: { type: 'string' } }, ok: { type: 'boolean' } }, required: ['issues', 'ok'] }",
-  "phase('Scan')",
-  "const scans = await parallel(args.files.map((f) => () => agent(`Review ${f} for correctness and reliability risks. Return at most 8 evidence references and 800 words.`, { label: `scan:${f}`, phase: 'Scan', model: 'opencode-go/deepseek-v4-flash', effort: 'medium', schema: FINDINGS })))",
-  "const failures = scans.filter((r) => !r.ok)",
-  "if (failures.length) return { error: 'Required scan failed; retry or rerun before reporting', failures: failures.map((r) => r.error) }",
-  "const findings = scans.map((r) => r.structured)",
-  "phase('Report')",
-  "const report = await agent(`Summarize these findings: ${JSON.stringify(findings)}`, { label: 'report', phase: 'Report', model: 'opencode-go/deepseek-v4-flash', effort: 'low' })",
-  "return { findings, report: report.ok ? report.output : report.error }",
-].join("\n");
+export function buildToolDescription(routesText: string): string {
+  const modelPolicy = routesText
+    ? `Model policy (from active subagent preset):\n${routesText}`
+    : "Model policy: select `provider/model-id` and `effort` intentionally for each agent. Use cheaper models for reconnaissance, premium models for implementation, and the most capable model for planning or consequential review.";
+  return [
+    "Use the workflow tool when the user explicitly requests a workflow, or when a substantial task has at least two independent workstreams or real phase dependencies that materially benefit from orchestration.",
+    "Run a multi-agent workflow from a JavaScript orchestration script you write inline. Subagents have separate model contexts but share the working tree. Suitable shapes include read-only research fan-out, per-file review, and reconnaissance-then-implementation pipelines.",
+    "The script runs as an async function body with these primitives:",
+    "• export const meta = { name, description, phases: [{ title, detail? }] } — metadata for the progress UI. Declare all phases up front.",
+    "• phase(title) — mark the current phase at runtime (use titles from meta.phases).",
+    "• await agent(prompt, { model, effort, label?, phase?, schema?, provider?, optional? }) — run ONE subagent in an isolated context and wait for it. `model` and `effort` are required; omission fails before any provider request. Use an exact `provider/model-id`, or pass `provider` separately. `effort` is off|minimal|low|medium|high|xhigh|max. Agents are required by default: after one fails, later agents are blocked and the workflow fails. Set `optional: true` only for planned best-effort read-only work whose absence does not invalidate later phases. Always resolves to { ok, output, structured?, error? }; check `ok`. With a JSON `schema`, `structured` holds the validated object. Children receive normal built-ins and trust-appropriate extensions, settings, skills, and AGENTS.md context, but cannot recursively orchestrate or ask the user.",
+    "• await parallel([() => agent(...), () => agent(...)], { concurrency? }) — run zero-argument agent thunks concurrently and return results in order. Concurrency is globally capped at 4 for the run.",
+    "• args — the parsed value of the `args` tool parameter (or undefined).",
+    "Workflow JavaScript runs in a restricted, killable child with no imports, eval, timers, filesystem, network, or process APIs. A run may make at most 32 agent calls and has no overall deadline. Each agent must receive its first assistant response event within 45 seconds so silent provider requests fail clearly; after that, agent() has no wall-clock deadline. Each individual child tool call times out independently after 3 minutes, becomes an error tool result, and leaves the agent loop free to recover. Use map/filter/if/await/template strings to orchestrate, and `return` a JSON-serializable aggregate.",
+    modelPolicy,
+    "Required-result policy: the runtime blocks later agents after a required failure. Do not retry failed calls inside the workflow by default. Let the workflow fail so the parent orchestrator can inspect the error and decide whether to retry, narrow/split the assignment, or change models. Never repeat an unchanged timeout, start a dependent or premium phase with missing findings, or automatically retry mutating agents.",
+    "Pass a `schema` to agent() whenever a later step branches on the result, so you get typed fields instead of prose. If an agent returns prose without calling structured_output, the runner gives it one same-session correction attempt before failing. There is no workflow resume. Artifacts are saved under ~/.pi/agent/workflows/<runId>/ for inspection.",
+    "Example:",
+    "export const meta = { name: 'reliability-review', description: 'Review modules for reliability risks, then report', phases: [{ title: 'Scan' }, { title: 'Report' }] }",
+    "const FINDINGS = { type: 'object', properties: { issues: { type: 'array', items: { type: 'string' } }, ok: { type: 'boolean' } }, required: ['issues', 'ok'] }",
+    "phase('Scan')",
+    "const scans = await parallel(args.files.map((f) => () => agent(`Review ${f} for correctness and reliability risks. Return at most 8 evidence references and 800 words.`, { label: `scan:${f}`, phase: 'Scan', model: 'opencode-go/deepseek-v4-flash', effort: 'medium', schema: FINDINGS })))",
+    "const failures = scans.filter((r) => !r.ok)",
+    "if (failures.length) return { error: 'Required scan failed; retry or rerun before reporting', failures: failures.map((r) => r.error) }",
+    "const findings = scans.map((r) => r.structured)",
+    "phase('Report')",
+    "const report = await agent(`Summarize these findings: ${JSON.stringify(findings)}`, { label: 'report', phase: 'Report', model: 'opencode-go/deepseek-v4-flash', effort: 'low' })",
+    "return { findings, report: report.ok ? report.output : report.error }",
+  ].join("\n");
+}
+
+/** @deprecated Use buildToolDescription() instead. */
+export const WORKFLOW_TOOL_DESCRIPTION = buildToolDescription("");
 
 /** Adds workflow orchestration primitives and background execution to the model's tool prompt. */
 export const WORKFLOW_PROMPT_SNIPPET =
   "Orchestrate separate-context subagents from an inline JS script: phase()/agent()/parallel() with structured outputs and optional background execution";
 
 /** Guides the model on appropriate workflow fan-out and mandatory agent result checks. */
-export const WORKFLOW_PROMPT_GUIDELINES = [
-  "Use the fewest agents that materially reduce context, uncertainty, or elapsed time: zero for clear local work, one for a single self-contained workstream, and two to four only for independent fan-out or real phase dependencies.",
-  "Use workflow when a task needs several subagents with phase dependencies or dynamic fan-out; keep focused one-off reconnaissance, review, implementation, and commit work in scout, review, agent, and commit.",
-  "Subagents share the working tree. Use at most one mutating agent in a workflow; parallel fan-out must be read-only. Prefer one implementation owner for connected changes.",
-  "In workflow scripts, every agent() call must explicitly set `model` and `effort`; omission fails safely before a provider request.",
-  "Use DeepSeek V4 Flash/medium for reconnaissance, Kimi K2.7 Code/high for implementation, and reserve GPT-5.6 Sol/high for planning or consequential adversarial/final review.",
-  "Agents are required by default, so a failure mechanically blocks later agent calls. Let required failures return to the parent orchestrator for a retry decision; do not blindly retry inside the workflow. Use `optional: true` only for planned best-effort read-only work whose absence cannot affect later phases. Never feed placeholders or incomplete findings into dependent or premium phases, repeat an unchanged timeout, or automatically retry mutating agents.",
-  "In workflow scripts, agent() never throws — always check `.ok` on its result before using `.output`/`.structured`.",
-];
+export function buildPromptGuidelines(routesText: string): string[] {
+  const modelGuidance = routesText
+    ? `Follow the active subagent preset routes:\n${routesText}`
+    : "Select `provider/model-id` and `effort` intentionally for each agent. Use cheaper models for reconnaissance, premium models for implementation, and the most capable model for planning or consequential review.";
+  return [
+    "Use the fewest agents that materially reduce context, uncertainty, or elapsed time: zero for clear local work, one for a single self-contained workstream, and two to four only for independent fan-out or real phase dependencies.",
+    "Use workflow when a task needs several subagents with phase dependencies or dynamic fan-out; keep focused one-off reconnaissance, review, implementation, and commit work in scout, review, agent, and commit.",
+    "Subagents share the working tree. Use at most one mutating agent in a workflow; parallel fan-out must be read-only. Prefer one implementation owner for connected changes.",
+    "In workflow scripts, every agent() call must explicitly set `model` and `effort`; omission fails safely before a provider request.",
+    modelGuidance,
+    "Agents are required by default, so a failure mechanically blocks later agent calls. Let required failures return to the parent orchestrator for a retry decision; do not blindly retry inside the workflow. Use `optional: true` only for planned best-effort read-only work whose absence cannot affect later phases. Never feed placeholders or incomplete findings into dependent or premium phases, repeat an unchanged timeout, or automatically retry mutating agents.",
+    "In workflow scripts, agent() never throws — always check `.ok` on its result before using `.output`/`.structured`.",
+  ];
+}
+
+/** @deprecated Use buildPromptGuidelines() instead. */
+export const WORKFLOW_PROMPT_GUIDELINES = buildPromptGuidelines("");
 
 /** Marks and forwards a workflow script's agent() task as an isolated child-model prompt. */
 export function buildWorkflowAgentPrompt(prompt: string) {

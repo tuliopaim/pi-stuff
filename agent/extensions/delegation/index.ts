@@ -17,6 +17,7 @@ import {
   isSubagentEnabled,
   registerDelegatedTool,
   setSubagentPreset,
+  validateRoute,
   type DelegationDetails,
   type DelegationPolicy,
 } from "./runtime.ts";
@@ -326,6 +327,10 @@ export default function (
     }),
     async execute(_id, params, signal, _update, ctx) {
       if (!THINKING_LEVELS.has(params.thinking)) throw new Error(`Invalid thinking level: ${params.thinking}`);
+      {
+        const v = validateRoute(params.model, params.thinking);
+        if (!v.allowed) throw new Error(v.error);
+      }
       const cwd = path.resolve(ctx.cwd, params.working_dir ?? ".");
       if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) throw new Error(`working_dir is not a directory: ${cwd}`);
       const snapshot = await getManager().spawn({

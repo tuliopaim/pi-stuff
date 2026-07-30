@@ -33,7 +33,26 @@ Model choices live in `agent/settings.json`. Switch the active set for the curre
 /subagent-preset
 /subagent-preset opencode-go
 /subagent-preset openai
+/subagent-preset copilot
 ```
+
+### Agent routes
+
+Each preset also defines an `agent.routes` list — the exact model/thinking combinations
+that `agent`, `subagent_spawn`, and workflow `agent()` are allowed to use. When a
+preset has routes configured, any request outside the list is rejected before
+spawning a child. Presets without routes retain the unrestricted default.
+
+See the available routes for the current session by calling any dynamic subagent
+tool with a disallowed model/thinking pair — the error message lists the permitted
+routes.
+
+### Mac mini default
+
+The Mac mini ships with `PI_SUBAGENT_PRESET=copilot` in its Nix host configuration
+(`nix/macos/hosts/macmini.nix`). This routes all subagent traffic through GitHub
+Copilot models for workplace isolation. The session-level `/subagent-preset`
+command still takes priority over the environment variable.
 
 The `/commit` command is a convenient front end for the same isolated commit agent. It only runs when explicitly requested. It reuses the tool-call presentation: a padded box that is gray while running and turns green on success or red on failure, streamed live above the editor and then recorded in the transcript. Press `Esc` while it runs to cancel; the cancelled run is kept in the transcript rather than discarded.
 
@@ -77,11 +96,15 @@ The `workflow` tool is for substantial tasks that need parallel research, phased
 
 Workflows are sandboxed, capped at four concurrent agents and 32 agent calls, and persist artifacts under `~/.pi/agent/workflows/<runId>/`. They can run in the foreground or background. `/workflows` opens the dashboard for active and completed runs.
 
-Every child selects its model and reasoning effort explicitly. The intended routing is:
+Every child selects its model and reasoning effort explicitly. The active
+subagent preset defines which model/thinking combinations are allowed; see the
+`agent.routes` in `agent/settings.json` for each preset's routing rules.
+Requests outside the configured routes are rejected before spawning.
 
-- `opencode-go/deepseek-v4-flash` for reconnaissance and routine checks
-- `opencode-go/kimi-k2.7-code` for implementation and integration
-- `openai-codex/gpt-5.6-sol` for planning or consequential final review
+For example, the `personal` preset routes:
+- `opencode-go/deepseek-v4-flash:medium` for reconnaissance
+- `opencode-go/kimi-k2.7-code:high` for implementation
+- `openai-codex/gpt-5.6-sol:medium` or `:high` for difficult or consequential work
 
 Required child failures stop dependent phases rather than silently feeding them incomplete results. Schema-bound results are available when later phases need structured data.
 

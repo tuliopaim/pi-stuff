@@ -48,6 +48,14 @@
           "skills": [
             "~/dotfiles/skills/commit-work"
           ]
+        },
+        "agent": {
+          "routes": [
+            { "model": "opencode-go/deepseek-v4-flash", "thinking": "medium", "guidance": "reconnaissance/routine checks" },
+            { "model": "opencode-go/kimi-k2.7-code", "thinking": "high", "guidance": "routine or clearly scoped implementation" },
+            { "model": "openai-codex/gpt-5.6-sol", "thinking": "medium", "guidance": "difficult implementation, ambiguous behavior, architecture-sensitive changes, or hard debugging" },
+            { "model": "openai-codex/gpt-5.6-sol", "thinking": "high", "guidance": "consequential planning, adversarial review, security, or data-loss work" }
+          ]
         }
       },
       "opencode-go": {
@@ -68,6 +76,13 @@
           "skills": [
             "~/dotfiles/skills/commit-work"
           ]
+        },
+        "agent": {
+          "routes": [
+            { "model": "opencode-go/deepseek-v4-flash", "thinking": "medium", "guidance": "reconnaissance/routine checks" },
+            { "model": "opencode-go/kimi-k2.7-code", "thinking": "high", "guidance": "routine or clearly scoped implementation" },
+            { "model": "opencode-go/kimi-k3", "thinking": "max", "guidance": "planning or consequential final review" }
+          ]
         }
       },
       "openai": {
@@ -87,6 +102,40 @@
           "thinking": "medium",
           "skills": [
             "~/dotfiles/skills/commit-work"
+          ]
+        },
+        "agent": {
+          "routes": [
+            { "model": "openai-codex/gpt-5.6-luna", "thinking": "low", "guidance": "reconnaissance/routine checks" },
+            { "model": "openai-codex/gpt-5.6-terra", "thinking": "medium", "guidance": "implementation and integration" },
+            { "model": "openai-codex/gpt-5.6-sol", "thinking": "high", "guidance": "planning or consequential final review" }
+          ]
+        }
+      },
+      "copilot": {
+        "scout": {
+          "model": "github-copilot/gpt-5.4-mini",
+          "thinking": "medium"
+        },
+        "review": {
+          "model": "github-copilot/gpt-5.6-sol",
+          "thinking": "high",
+          "skills": [
+            "*"
+          ]
+        },
+        "commit": {
+          "model": "github-copilot/gpt-5.4-mini",
+          "thinking": "medium",
+          "skills": [
+            "~/dotfiles/skills/commit-work"
+          ]
+        },
+        "agent": {
+          "routes": [
+            { "model": "github-copilot/gpt-5.4-mini", "thinking": "medium", "guidance": "reconnaissance/routine checks" },
+            { "model": "github-copilot/gpt-5.6-terra", "thinking": "medium", "guidance": "implementation and integration" },
+            { "model": "github-copilot/gpt-5.6-sol", "thinking": "high", "guidance": "difficult planning or consequential review" }
           ]
         }
       }
