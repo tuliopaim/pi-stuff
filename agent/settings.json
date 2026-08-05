@@ -1,12 +1,15 @@
 {
   "lastChangelogVersion": "0.83.0",
-  "defaultProvider": "openai-codex",
+  "defaultProvider": "github-copilot",
   "defaultModel": "gpt-5.6-luna",
-  "defaultThinkingLevel": "high",
+  "defaultThinkingLevel": "medium",
   "enabledModels": [
-    "openai-codex/gpt-5.6-luna:high",
+    "github-copilot/gpt-5.6-luna:medium",
+    "github-copilot/gpt-5.6-sol:medium",
+    "github-copilot/gpt-5.6-terra:medium",
     "openai-codex/gpt-5.6-sol:medium",
     "openai-codex/gpt-5.6-terra:high",
+    "openai-codex/gpt-5.6-luna:high",
     "opencode-go/deepseek-v4-flash:high",
     "opencode-go/kimi-k2.7-code:high",
     "opencode-go/minimax-m3:high"
@@ -158,7 +161,7 @@
       },
       "copilot": {
         "scout": {
-          "model": "github-copilot/gpt-5.4-mini",
+          "model": "github-copilot/gpt-5.6-luna",
           "thinking": "medium"
         },
         "review": {
@@ -169,7 +172,7 @@
           ]
         },
         "commit": {
-          "model": "github-copilot/gpt-5.4-mini",
+          "model": "github-copilot/gpt-5.6-luna",
           "thinking": "medium",
           "skills": [
             "~/dotfiles/skills/commit-work"
