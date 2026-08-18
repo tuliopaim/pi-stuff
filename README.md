@@ -13,7 +13,6 @@ Inspired by [Ben Davis's Pi setup](https://github.com/davis7dotsh/my-pi-setup), 
 - **Fresh-context plan execution** with `/implement-plan`
 - **Reusable prompts and skills**, including `/orchestrate`
 - **Browser-free web research tools** through the local `web-tools` extension
-- **Simplicity-focused coding guidance** through `ponytail`
 
 ## Subagents
 
@@ -146,7 +145,7 @@ Use `/skill:orchestrated-task <task>` as the direct alternative. For other large
 - personal skills from `~/dotfiles/skills`
 - all local extensions from `~/dotfiles/pi/agent/extensions`
 
-The included prompt templates expose commands such as `/orchestrate`. The local `web-tools` extension provides browser-free public web search and content retrieval, while the installed `ponytail` package provides deliberately minimal, YAGNI-oriented implementation guidance.
+The included prompt templates expose commands such as `/orchestrate`. The local `web-tools` extension provides browser-free public web search and content retrieval.
 
 ## Shared extension structure
 

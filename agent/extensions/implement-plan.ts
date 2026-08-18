@@ -108,7 +108,7 @@ export default function (pi: ExtensionAPI) {
       if (!confirmed) return;
 
       const prompt = buildPrompt(displayPath, plan);
-      // ponytail: replacement contexts use the configured default model; restore the selected model when Pi exposes model switching here.
+      // Replacement contexts use the configured default model; restore the selected model when Pi exposes model switching here.
       await ctx.newSession({
         parentSession: ctx.sessionManager.getSessionFile(),
         withSession: (ctx) => ctx.sendUserMessage(prompt),

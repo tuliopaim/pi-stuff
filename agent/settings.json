@@ -1,7 +1,7 @@
 {
-  "lastChangelogVersion": "0.83.0",
-  "defaultProvider": "openai-codex",
-  "defaultModel": "gpt-5.6-luna",
+  "lastChangelogVersion": "0.84.2",
+  "defaultProvider": "opencode-go",
+  "defaultModel": "deepseek-v4-flash",
   "defaultThinkingLevel": "high",
   "enabledModels": [
     "openai-codex/gpt-5.6-luna:high",
@@ -14,7 +14,6 @@
   "editorPaddingX": 2,
   "hideThinkingBlock": true,
   "packages": [
-    "git:github.com/DietrichGebert/ponytail",
     "npm:@ff-labs/pi-fff",
     "git:github.com/code-yeongyu/pi-apply-patch",
     "npm:@plannotator/pi-extension"
