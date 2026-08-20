@@ -3,6 +3,8 @@ import { Input, truncateToWidth, wrapTextWithAnsi, type Component, type Focusabl
 import type { SubagentManager } from "./manager.ts";
 import type { SubagentSnapshot } from "./domain.ts";
 import { formatContextUtilization } from "../shared/context-utilization.ts";
+import { sanitizeTerminalText } from "./presentation.ts";
+export { sanitizeTerminalText } from "./presentation.ts";
 
 type Theme = ExtensionCommandContext["ui"]["theme"];
 
@@ -13,15 +15,6 @@ function elapsed(snapshot: SubagentSnapshot) {
 
 function square(snapshot: SubagentSnapshot, theme: Theme) {
   return theme.fg(snapshot.status === "done" ? "success" : snapshot.status === "running" ? "warning" : "error", "■");
-}
-
-export function sanitizeTerminalText(text: string) {
-  return text
-    .replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, "")
-    .replace(/\x1B(?:\[[0-?]*[ -/]*[@-~]|[@-_])/g, "")
-    .replace(/\r\n?/g, "\n")
-    .replace(/\t/g, "    ")
-    .replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g, "");
 }
 
 export interface DashboardSelection { id?: string; index: number }

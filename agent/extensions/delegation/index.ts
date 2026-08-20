@@ -7,6 +7,7 @@ import { formatActivityStatus } from "../shared/activity-status.ts";
 import { showSubagents, showTakeover } from "./dashboard.ts";
 import { SubagentManager, truncateSubagentOutput } from "./manager.ts";
 import type { SubagentSnapshot } from "./domain.ts";
+import { formatSubagentUsage, formatWaitingSubagents, renderSubagentMonitor } from "./presentation.ts";
 import { renderDelegationMessage } from "./render.ts";
 import {
   createDelegationDetails,
@@ -181,6 +182,8 @@ export default function (
   let manager: SubagentManager | undefined;
   let context: ExtensionContext | undefined;
   let unsubscribe: (() => void) | undefined;
+  let updateTimer: ReturnType<typeof setTimeout> | undefined;
+  let monitorClock: ReturnType<typeof setInterval> | undefined;
   const acknowledged = new Set<string>();
   const pendingResults = new Map<string, SubagentSnapshot>();
   const getManager = () => {
@@ -196,6 +199,33 @@ export default function (
     context.ui.setStatus("subagents", running || done || failed
       ? formatActivityStatus(context.ui.theme, "subagents", { running, done, failed })
       : undefined);
+    // Foreground one-off agents already own a tool card. The persistent monitor
+    // is only for subagent_spawn jobs that otherwise have no live home.
+    const monitored = entries.filter((entry) =>
+      entry.origin === "generic" && (entry.status === "running" || !entry.consumed));
+    context.ui.setWidget?.("subagents-monitor", monitored.length
+      ? (_tui, theme) => ({
+          render: (width) => renderSubagentMonitor(monitored, width, theme),
+          invalidate() {},
+        })
+      : undefined);
+    const shouldTick = monitored.some((entry) => entry.status === "running");
+    if (shouldTick && !monitorClock) {
+      monitorClock = setInterval(updateStatus, 1_000);
+      monitorClock.unref?.();
+    } else if (!shouldTick && monitorClock) {
+      clearInterval(monitorClock);
+      monitorClock = undefined;
+    }
+  };
+  const scheduleUpdate = () => {
+    if (updateTimer) return;
+    updateStatus();
+    updateTimer = setTimeout(() => {
+      updateTimer = undefined;
+      updateStatus();
+    }, 100);
+    updateTimer.unref?.();
   };
   const settled = (snapshot: SubagentSnapshot) => {
     if (!context) return;
@@ -218,7 +248,7 @@ export default function (
       try {
         pi.sendMessage({
           customType: "subagent-result", display: true,
-          content: `Subagent ${snapshot.id} “${snapshot.title}” ${snapshot.status}.\n\n${snapshot.error ? `Error: ${snapshot.error}\n\n` : ""}${bounded.output}`,
+          content: `Subagent ${snapshot.id} “${snapshot.title}” ${snapshot.status}.\n${formatSubagentUsage(snapshot)}\n\n${snapshot.error ? `Error: ${snapshot.error}\n\n` : ""}${bounded.output}`,
           details: { id: snapshot.id, title: snapshot.title, status: snapshot.status },
         }, { deliverAs: "followUp", triggerTurn: true });
         manager?.consume(snapshot.id);
@@ -234,7 +264,7 @@ export default function (
       if (entry.status !== "running") acknowledged.add(entry.id);
       if (entry.origin === "generic" && entry.status !== "running" && !entry.consumed) pendingResults.set(entry.id, entry);
     }
-    unsubscribe = manager.subscribe(updateStatus);
+    unsubscribe = manager.subscribe(scheduleUpdate);
     updateStatus();
     if (pendingResults.size) queueMicrotask(flushResults);
     const active = getActiveSubagentPresetName();
@@ -243,7 +273,12 @@ export default function (
 
   pi.on("session_shutdown", async (_event, ctx) => {
     unsubscribe?.(); unsubscribe = undefined;
+    if (updateTimer) clearTimeout(updateTimer);
+    updateTimer = undefined;
+    if (monitorClock) clearInterval(monitorClock);
+    monitorClock = undefined;
     ctx.ui.setStatus("subagents", undefined);
+    ctx.ui.setWidget?.("subagents-monitor", undefined);
     pendingResults.clear();
     const closing = manager; manager = undefined; context = undefined;
     await closing?.shutdown();
@@ -341,6 +376,13 @@ export default function (
       });
       return { content: [{ type: "text", text: `Started ${snapshot.id} “${snapshot.title}” in ${cwd}.` }], details: { id: snapshot.id, status: snapshot.status } };
     },
+    renderCall(args, theme) {
+      const name = typeof args.name === "string" && args.name.trim() ? args.name.trim() : "subagent";
+      let text = `${theme.fg("toolTitle", theme.bold("spawn subagent "))}${theme.fg("accent", name)}`;
+      if (args.model) text += `\n${theme.fg("dim", `${args.model}:${args.thinking ?? "?"}`)}`;
+      if (args.task) text += `\n${theme.fg("muted", args.task)}`;
+      return new Text(text, 0, 0);
+    },
   });
 
   pi.registerTool({
@@ -350,10 +392,24 @@ export default function (
       const ids = [...new Set(params.ids)];
       if (!ids.length) throw new Error("Provide at least one subagent id.");
       if (ids.some((id) => getManager().get(id)?.origin === "btw")) throw new Error("By-the-way sessions are only available through the TUI.");
-      onUpdate?.({ content: [{ type: "text", text: `Waiting for ${ids.join(", ")}…` }], details: { pending: ids } });
-      const snapshots = await getManager().wait(ids, signal);
+      const emit = () => {
+        const entries = ids.map((id) => getManager().get(id)).filter((entry): entry is SubagentSnapshot => Boolean(entry));
+        onUpdate?.({ content: [{ type: "text", text: formatWaitingSubagents(entries) }], details: { pending: ids } });
+      };
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const unsubscribeWait = onUpdate ? getManager().subscribe(() => {
+        if (!timer) timer = setTimeout(() => { timer = undefined; emit(); }, 150);
+      }) : undefined;
+      emit();
+      let snapshots: SubagentSnapshot[];
+      try {
+        snapshots = await getManager().wait(ids, signal);
+      } finally {
+        unsubscribeWait?.();
+        if (timer) clearTimeout(timer);
+      }
       for (const id of ids) { getManager().consume(id); pendingResults.delete(id); }
-      const combined = snapshots.map((snapshot) => `## ${snapshot.id} “${snapshot.title}” — ${snapshot.status}\n${snapshot.error ? `Error: ${snapshot.error}\n` : ""}${truncateSubagentOutput(snapshot.output || "(no output)", 200, 16 * 1024, "[output truncated]", snapshot.sessionFile).output}`).join("\n\n---\n\n");
+      const combined = snapshots.map((snapshot) => `## ${snapshot.id} “${snapshot.title}” — ${snapshot.status}\n${formatSubagentUsage(snapshot)}\n${snapshot.error ? `Error: ${snapshot.error}\n` : ""}${truncateSubagentOutput(snapshot.output || "(no output)", 200, 16 * 1024, "[output truncated]", snapshot.sessionFile).output}`).join("\n\n---\n\n");
       const text = truncateSubagentOutput(combined, 800, 64 * 1024, "[combined subagent output truncated]").output;
       return { content: [{ type: "text", text }], details: { results: snapshots.map(({ id, status }) => ({ id, status })) } };
     },
@@ -377,7 +433,7 @@ export default function (
       const snapshot = getManager().get(params.id);
       if (!snapshot || snapshot.origin === "btw") throw new Error(`Unknown subagent id "${params.id}".`);
       const preview = (snapshot.liveText || snapshot.output || "(no output yet)").slice(-2048);
-      return { content: [{ type: "text", text: `${snapshot.id} [${snapshot.status}] “${snapshot.title}”\n${preview}` }], details: { id: snapshot.id, status: snapshot.status } };
+      return { content: [{ type: "text", text: `${snapshot.id} [${snapshot.status}] “${snapshot.title}”\n${formatSubagentUsage(snapshot)}\n${preview}` }], details: { id: snapshot.id, status: snapshot.status } };
     },
   });
 

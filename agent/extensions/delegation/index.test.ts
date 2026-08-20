@@ -221,6 +221,75 @@ test("restored unconsumed background results are delivered once and consumed", a
   assert.deepEqual(consumed, ["sa_restored"]);
 });
 
+test("main thread shows a live subagent monitor widget", () => {
+  const events = new Map<string, any>();
+  const widgets = new Map<string, any>();
+  const listeners = new Set<() => void>();
+  const snapshot: any = {
+    id: "sa_live", origin: "generic", title: "implementation", task: "task", cwd: process.cwd(),
+    model: "test/model", thinking: "high", status: "running", mutating: true, createdAt: Date.now(),
+    output: "", liveText: "", liveThinking: "", activities: ["edit: feature.ts"], queued: [], transcript: [],
+    usage: { turns: 1, input: 1200, output: 200, cacheRead: 0, cacheWrite: 0, cost: 0.02, contextTokens: 4000, contextWindow: 100000 },
+    consumed: false,
+  };
+  const oneOff: any = {
+    ...snapshot,
+    id: "sa_commit",
+    origin: "commit",
+    title: "Commit",
+    task: "create commits",
+    model: "test/commit-model",
+  };
+  const manager: any = {
+    list: () => [snapshot, oneOff], subscribe: (listener: () => void) => { listeners.add(listener); return () => listeners.delete(listener); },
+    shutdown: async () => {},
+  };
+  registerDelegation({
+    registerTool() {}, registerCommand() {}, registerMessageRenderer() {}, registerEntryRenderer() {},
+    on(name: string, handler: any) { events.set(name, handler); },
+  } as any, () => manager);
+  const theme: any = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+  const ctx: any = {
+    hasUI: true, ui: { theme, setStatus() {}, setWidget(key: string, value: any) { widgets.set(key, value); }, notify() {} },
+    sessionManager: { getSessionId: () => "parent" },
+  };
+
+  events.get("session_start")({}, ctx);
+  const factory = widgets.get("subagents-monitor");
+  assert.equal(typeof factory, "function");
+  const rendered = factory({}, theme).render(160).join("\n");
+  assert.match(rendered, /test\/model:high/);
+  assert.doesNotMatch(rendered, /Commit|commit-model/);
+
+  snapshot.activities.push("bash: npm test");
+  for (const listener of listeners) listener();
+  assert.match(widgets.get("subagents-monitor")({}, theme).render(160).join("\n"), /npm test/);
+});
+
+test("one-off foreground agents do not open the persistent monitor", () => {
+  const events = new Map<string, any>();
+  const widgets = new Map<string, any>();
+  const snapshot: any = {
+    id: "sa_commit", origin: "commit", title: "Commit", task: "create commits", cwd: process.cwd(),
+    model: "test/model", thinking: "medium", status: "running", mutating: true, createdAt: Date.now(),
+    output: "", liveText: "", liveThinking: "", activities: [], queued: [], transcript: [], consumed: false,
+    usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0 },
+  };
+  const manager: any = { list: () => [snapshot], subscribe: () => () => {}, shutdown: async () => {} };
+  registerDelegation({
+    registerTool() {}, registerCommand() {}, registerMessageRenderer() {}, registerEntryRenderer() {},
+    on(name: string, handler: any) { events.set(name, handler); },
+  } as any, () => manager);
+  const ctx: any = {
+    hasUI: true,
+    ui: { theme: { fg: (_color: string, text: string) => text }, setStatus() {}, setWidget(key: string, value: any) { widgets.set(key, value); }, notify() {} },
+    sessionManager: { getSessionId: () => "parent" },
+  };
+
+  events.get("session_start")({}, ctx);
+  assert.equal(widgets.get("subagents-monitor"), undefined);
+});
+
 test("/btw persists a TUI entry without injecting the answer into model context", async () => {
   const commands = new Map<string, any>();
   const events = new Map<string, any>();
