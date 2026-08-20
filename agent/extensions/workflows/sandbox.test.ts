@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { runWorkflowSandbox } from "./sandbox.ts";
+import {
+  resolveWorkflowNodeExecutable,
+  runWorkflowSandbox,
+} from "./sandbox.ts";
 
 function run(
   source: string,
@@ -17,6 +20,30 @@ function run(
     ...overrides,
   });
 }
+
+test("standalone Pi uses Node from PATH for the permission sandbox", () => {
+  assert.equal(
+    resolveWorkflowNodeExecutable({
+      execPath: "/opt/pi/pi",
+      env: {},
+      release: { name: "bun" },
+      allowedNodeEnvironmentFlags: new Set(),
+    }),
+    "node",
+  );
+});
+
+test("Node-hosted Pi reuses its permission-capable runtime", () => {
+  assert.equal(
+    resolveWorkflowNodeExecutable({
+      execPath: "/opt/node/bin/node",
+      env: {},
+      release: { name: "node" },
+      allowedNodeEnvironmentFlags: new Set(["--permission"]),
+    }),
+    "/opt/node/bin/node",
+  );
+});
 
 test("sandbox exposes only workflow capabilities and validates results", async () => {
   const phases: string[] = [];

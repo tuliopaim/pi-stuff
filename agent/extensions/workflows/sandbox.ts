@@ -40,6 +40,33 @@ export interface RunWorkflowSandboxOptions {
   onPhase: (title: string) => void;
 }
 
+interface SandboxRuntime {
+  execPath: string;
+  env: NodeJS.ProcessEnv;
+  release?: { name?: string };
+  allowedNodeEnvironmentFlags?: ReadonlySet<string>;
+}
+
+/**
+ * Pi's standalone release is compiled with Bun, which has no equivalent to
+ * Node's permission model. The sandbox must therefore use the Node executable
+ * from PATH in that distribution, while npm-installed Pi can reuse its Node
+ * process directly.
+ */
+export function resolveWorkflowNodeExecutable(
+  runtime: SandboxRuntime = process,
+) {
+  const configured = runtime.env.PI_WORKFLOW_NODE?.trim();
+  if (configured) return configured;
+  if (
+    runtime.release?.name === "node" &&
+    runtime.allowedNodeEnvironmentFlags?.has("--permission")
+  ) {
+    return runtime.execPath;
+  }
+  return "node";
+}
+
 function byteLength(value: string) {
   return Buffer.byteLength(value, "utf8");
 }
@@ -83,11 +110,6 @@ function sanitizeAgentOptions(value: unknown): SandboxAgentOptions {
  * are aborted only when the workflow is cancelled or the sandbox is cleaned up.
  */
 export function runWorkflowSandbox(options: RunWorkflowSandboxOptions) {
-  if (!process.allowedNodeEnvironmentFlags.has("--permission")) {
-    return Promise.reject(
-      new Error("This Node runtime cannot enforce workflow child permissions"),
-    );
-  }
   if (byteLength(options.source) > MAX_SOURCE_BYTES) {
     return Promise.reject(
       new Error(`Workflow script exceeds the ${MAX_SOURCE_BYTES} byte limit`),
@@ -107,7 +129,7 @@ export function runWorkflowSandbox(options: RunWorkflowSandboxOptions) {
       new URL("./sandbox-child.cjs", import.meta.url),
     );
     const child = spawn(
-      process.execPath,
+      resolveWorkflowNodeExecutable(),
       [
         "--permission",
         `--allow-fs-read=${path.dirname(workerPath)}`,
