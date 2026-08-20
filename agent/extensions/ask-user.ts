@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   Editor,
   type EditorTheme,
@@ -16,6 +16,12 @@ import {
   ASK_USER_TOOL_DESCRIPTION,
   buildAskUserResultMessage,
 } from "./shared/ask-user-prompt.ts";
+import {
+  buildResumedAnswerMessage,
+  findLatestAskUserQuestion,
+  findPendingAskUserQuestion,
+  type AskUserQuestion,
+} from "./shared/ask-user-session.ts";
 
 const MIN_OPTIONS = 2;
 const MAX_OPTIONS = 5;
@@ -46,6 +52,163 @@ type SelectionResult = { answer: string; wasCustom: boolean; index?: number } | 
 type DisplayOption = { label: string; description?: string; isOther?: boolean };
 
 export default function askUser(pi: ExtensionAPI) {
+  const presentQuestion = async (
+    params: Pick<AskUserQuestion, "question" | "options">,
+    ctx: ExtensionContext,
+    signal?: AbortSignal,
+  ): Promise<SelectionResult> => {
+    if (ctx.mode !== "tui" || signal?.aborted) return null;
+
+    const options: DisplayOption[] = [
+      ...params.options,
+      { label: "Write my own answer…", isOther: true },
+    ];
+
+    return ctx.ui.custom<SelectionResult>((tui, theme, _kb, done) => {
+      let optionIndex = 0;
+      let editMode = false;
+      let settled = false;
+      let cachedLines: string[] | undefined;
+
+      const finish = (value: SelectionResult) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener("abort", cancel);
+        done(value);
+      };
+      const cancel = () => finish(null);
+      signal?.addEventListener("abort", cancel, { once: true });
+      if (signal?.aborted) queueMicrotask(cancel);
+
+      const editorTheme: EditorTheme = {
+        borderColor: (text) => theme.fg("accent", text),
+        selectList: {
+          selectedPrefix: (text) => theme.fg("accent", text),
+          selectedText: (text) => theme.fg("accent", text),
+          description: (text) => theme.fg("muted", text),
+          scrollInfo: (text) => theme.fg("dim", text),
+          noMatch: (text) => theme.fg("warning", text),
+        },
+      };
+      const editor = new Editor(tui, editorTheme);
+
+      const refresh = () => {
+        cachedLines = undefined;
+        tui.requestRender();
+      };
+      const select = (index: number) => {
+        const selected = options[index];
+        if (selected.isOther) {
+          optionIndex = index;
+          editMode = true;
+          refresh();
+        } else {
+          finish({ answer: selected.label, wasCustom: false, index: index + 1 });
+        }
+      };
+
+      editor.onSubmit = (value) => {
+        const answer = value.trim();
+        if (answer) finish({ answer, wasCustom: true });
+        else {
+          editMode = false;
+          editor.setText("");
+          refresh();
+        }
+      };
+
+      const addWrapped = (lines: string[], prefix: string, text: string, width: number) => {
+        const prefixWidth = visibleWidth(prefix);
+        const wrapped = wrapTextWithAnsi(text, Math.max(1, width - prefixWidth));
+        for (let i = 0; i < wrapped.length; i++) {
+          lines.push(`${i === 0 ? prefix : " ".repeat(prefixWidth)}${wrapped[i]}`);
+        }
+      };
+
+      return {
+        handleInput(data: string) {
+          if (editMode) {
+            if (matchesKey(data, Key.escape)) {
+              editMode = false;
+              editor.setText("");
+              refresh();
+            } else {
+              editor.handleInput(data);
+              refresh();
+            }
+            return;
+          }
+          if (matchesKey(data, Key.up)) optionIndex = (optionIndex - 1 + options.length) % options.length;
+          else if (matchesKey(data, Key.down)) optionIndex = (optionIndex + 1) % options.length;
+          else if (data.length === 1 && data >= "1" && data <= String(options.length)) return select(Number(data) - 1);
+          else if (matchesKey(data, Key.enter)) return select(optionIndex);
+          else if (matchesKey(data, Key.escape)) return finish(null);
+          else return;
+          refresh();
+        },
+        render(width: number) {
+          if (cachedLines) return cachedLines;
+          const lines: string[] = [theme.fg("accent", "─".repeat(width))];
+          addWrapped(lines, " ", theme.fg("text", theme.bold(params.question)), width);
+          lines.push("");
+
+          options.forEach((option, index) => {
+            const selected = index === optionIndex;
+            const prefix = selected ? theme.fg("accent", " ❯ ") : "   ";
+            const marker = option.isOther ? "✎" : `${index + 1}.`;
+            addWrapped(lines, prefix, theme.fg(selected ? "accent" : option.isOther ? "muted" : "text", `${marker} ${option.label}`), width);
+            if (option.description) addWrapped(lines, "      ", theme.fg("muted", option.description), width);
+          });
+
+          if (editMode) {
+            lines.push("", theme.fg("muted", " Your answer:"));
+            for (const line of editor.render(Math.max(1, width - 2))) lines.push(` ${line}`);
+          }
+          lines.push("");
+          addWrapped(
+            lines,
+            " ",
+            theme.fg("dim", editMode ? "Enter submit • Esc back" : `↑↓ or 1-${options.length} select • Enter confirm • Esc dismiss`),
+            width,
+          );
+          lines.push(theme.fg("accent", "─".repeat(width)));
+          cachedLines = lines;
+          return lines;
+        },
+        invalidate() { cachedLines = undefined; },
+        dispose() { signal?.removeEventListener("abort", cancel); },
+      };
+    });
+  };
+
+  const resumeQuestion = async (question: AskUserQuestion, ctx: ExtensionContext) => {
+    const result = await presentQuestion(question, ctx);
+    if (!result) return;
+    pi.sendUserMessage(buildResumedAnswerMessage(result));
+  };
+
+  pi.on("session_start", async (_event, ctx) => {
+    if (ctx.mode !== "tui") return;
+    const question = findPendingAskUserQuestion(ctx.sessionManager.getBranch());
+    if (question) await resumeQuestion(question, ctx);
+  });
+
+  pi.registerCommand("reask", {
+    description: "Replay the most recent ask_user question",
+    handler: async (_args, ctx) => {
+      if (ctx.mode !== "tui") {
+        ctx.ui.notify("The ask_user dialog is only available in the TUI.", "warning");
+        return;
+      }
+      const question = findLatestAskUserQuestion(ctx.sessionManager.getBranch());
+      if (!question) {
+        ctx.ui.notify("No ask_user question found in the current branch.", "warning");
+        return;
+      }
+      await resumeQuestion(question, ctx);
+    },
+  });
+
   pi.registerTool({
     name: "ask_user",
     label: "Ask User",
@@ -73,126 +236,7 @@ export default function askUser(pi: ExtensionAPI) {
       if (ctx.mode !== "tui") return reply(buildAskUserResultMessage({ kind: "no-ui" }));
       if (signal?.aborted) return reply(buildAskUserResultMessage({ kind: "cancelled" }));
 
-      const options: DisplayOption[] = [
-        ...params.options,
-        { label: "Write my own answer…", isOther: true },
-      ];
-
-      const result = await ctx.ui.custom<SelectionResult>((tui, theme, _kb, done) => {
-        let optionIndex = 0;
-        let editMode = false;
-        let settled = false;
-        let cachedLines: string[] | undefined;
-
-        const finish = (value: SelectionResult) => {
-          if (settled) return;
-          settled = true;
-          signal?.removeEventListener("abort", cancel);
-          done(value);
-        };
-        const cancel = () => finish(null);
-        signal?.addEventListener("abort", cancel, { once: true });
-        if (signal?.aborted) queueMicrotask(cancel);
-
-        const editorTheme: EditorTheme = {
-          borderColor: (text) => theme.fg("accent", text),
-          selectList: {
-            selectedPrefix: (text) => theme.fg("accent", text),
-            selectedText: (text) => theme.fg("accent", text),
-            description: (text) => theme.fg("muted", text),
-            scrollInfo: (text) => theme.fg("dim", text),
-            noMatch: (text) => theme.fg("warning", text),
-          },
-        };
-        const editor = new Editor(tui, editorTheme);
-
-        const refresh = () => {
-          cachedLines = undefined;
-          tui.requestRender();
-        };
-        const select = (index: number) => {
-          const selected = options[index];
-          if (selected.isOther) {
-            optionIndex = index;
-            editMode = true;
-            refresh();
-          } else {
-            finish({ answer: selected.label, wasCustom: false, index: index + 1 });
-          }
-        };
-
-        editor.onSubmit = (value) => {
-          const answer = value.trim();
-          if (answer) finish({ answer, wasCustom: true });
-          else {
-            editMode = false;
-            editor.setText("");
-            refresh();
-          }
-        };
-
-        const addWrapped = (lines: string[], prefix: string, text: string, width: number) => {
-          const prefixWidth = visibleWidth(prefix);
-          const wrapped = wrapTextWithAnsi(text, Math.max(1, width - prefixWidth));
-          for (let i = 0; i < wrapped.length; i++) {
-            lines.push(`${i === 0 ? prefix : " ".repeat(prefixWidth)}${wrapped[i]}`);
-          }
-        };
-
-        return {
-          handleInput(data: string) {
-            if (editMode) {
-              if (matchesKey(data, Key.escape)) {
-                editMode = false;
-                editor.setText("");
-                refresh();
-              } else {
-                editor.handleInput(data);
-                refresh();
-              }
-              return;
-            }
-            if (matchesKey(data, Key.up)) optionIndex = (optionIndex - 1 + options.length) % options.length;
-            else if (matchesKey(data, Key.down)) optionIndex = (optionIndex + 1) % options.length;
-            else if (data.length === 1 && data >= "1" && data <= String(options.length)) return select(Number(data) - 1);
-            else if (matchesKey(data, Key.enter)) return select(optionIndex);
-            else if (matchesKey(data, Key.escape)) return finish(null);
-            else return;
-            refresh();
-          },
-          render(width: number) {
-            if (cachedLines) return cachedLines;
-            const lines: string[] = [theme.fg("accent", "─".repeat(width))];
-            addWrapped(lines, " ", theme.fg("text", theme.bold(params.question)), width);
-            lines.push("");
-
-            options.forEach((option, index) => {
-              const selected = index === optionIndex;
-              const prefix = selected ? theme.fg("accent", " ❯ ") : "   ";
-              const marker = option.isOther ? "✎" : `${index + 1}.`;
-              addWrapped(lines, prefix, theme.fg(selected ? "accent" : option.isOther ? "muted" : "text", `${marker} ${option.label}`), width);
-              if (option.description) addWrapped(lines, "      ", theme.fg("muted", option.description), width);
-            });
-
-            if (editMode) {
-              lines.push("", theme.fg("muted", " Your answer:"));
-              for (const line of editor.render(Math.max(1, width - 2))) lines.push(` ${line}`);
-            }
-            lines.push("");
-            addWrapped(
-              lines,
-              " ",
-              theme.fg("dim", editMode ? "Enter submit • Esc back" : `↑↓ or 1-${options.length} select • Enter confirm • Esc dismiss`),
-              width,
-            );
-            lines.push(theme.fg("accent", "─".repeat(width)));
-            cachedLines = lines;
-            return lines;
-          },
-          invalidate() { cachedLines = undefined; },
-          dispose() { signal?.removeEventListener("abort", cancel); },
-        };
-      });
+      const result = await presentQuestion(params, ctx, signal);
 
       if (!result) return reply(buildAskUserResultMessage({ kind: "dismissed" }));
       if (result.wasCustom) {
