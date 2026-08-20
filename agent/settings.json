@@ -1,7 +1,7 @@
 {
   "lastChangelogVersion": "0.84.2",
-  "defaultProvider": "opencode-go",
-  "defaultModel": "deepseek-v4-flash",
+  "defaultProvider": "openai-codex",
+  "defaultModel": "gpt-5.6-luna",
   "defaultThinkingLevel": "high",
   "enabledModels": [
     "openai-codex/gpt-5.6-luna:high",
@@ -12,7 +12,7 @@
     "opencode-go/minimax-m3:high"
   ],
   "editorPaddingX": 2,
-  "hideThinkingBlock": true,
+  "hideThinkingBlock": false,
   "packages": [
     "npm:@ff-labs/pi-fff",
     "git:github.com/code-yeongyu/pi-apply-patch",
@@ -208,5 +208,6 @@
     }
   },
   "treeFilterMode": "no-tools",
-  "theme": "dark"
+  "theme": "dark",
+  "showCacheMissNotices": true
 }
