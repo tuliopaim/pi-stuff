@@ -58,6 +58,11 @@
               "guidance": "reconnaissance/routine checks"
             },
             {
+              "model": "openai-codex/gpt-5.6-luna",
+              "thinking": "high",
+              "guidance": "explicitly requested fast parallel reconnaissance or routine work"
+            },
+            {
               "model": "opencode-go/kimi-k2.7-code",
               "thinking": "high",
               "guidance": "routine or clearly scoped implementation"
@@ -181,6 +186,11 @@
               "model": "github-copilot/gpt-5.4-mini",
               "thinking": "medium",
               "guidance": "reconnaissance/routine checks"
+            },
+            {
+              "model": "github-copilot/gpt-5.6-luna",
+              "thinking": "high",
+              "guidance": "explicitly requested fast parallel reconnaissance or routine work"
             },
             {
               "model": "github-copilot/gpt-5.6-terra",

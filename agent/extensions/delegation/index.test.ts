@@ -65,8 +65,15 @@ test("model guidance scales delegation by independent workstreams", () => {
   assert.match(tools.get("agent").promptGuidelines.join("\n"), /Do not split connected implementation/);
   assert.match(tools.get("subagent_spawn").promptGuidelines.join("\n"), /Treat four as a hard ceiling, not a target/);
 
-  const orchestrate = readFileSync(join(process.cwd(), "prompts/orchestrate.md"), "utf8");
-  assert.match(orchestrate, /Use at most one mutating agent in the workflow/);
+  const workflow = readFileSync(join(process.cwd(), "prompts/workflow.md"), "utf8");
+  assert.match(workflow, /Use at most one mutating agent/);
+  assert.match(workflow, /do not replace it with direct `agent`/);
+
+  const settings = JSON.parse(readFileSync(join(process.cwd(), "settings.json"), "utf8"));
+  assert.ok(settings.subagents.presets.personal.agent.routes.some((route: any) =>
+    route.model === "openai-codex/gpt-5.6-luna" && route.thinking === "high"));
+  assert.ok(settings.subagents.presets.copilot.agent.routes.some((route: any) =>
+    route.model === "github-copilot/gpt-5.6-luna" && route.thinking === "high"));
 });
 
 test("agent renderer replaces its Kimi default when streamed arguments select Sol", () => {

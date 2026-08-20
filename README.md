@@ -11,7 +11,7 @@ Inspired by [Ben Davis's Pi setup](https://github.com/davis7dotsh/my-pi-setup), 
 - **Interactive questions** with multiple-choice and free-form answers
 - **A two-line footer** showing model, context usage, cost, generation speed, branch, and changed files
 - **Fresh-context plan execution** with `/implement-plan`
-- **Reusable prompts and skills**, including `/orchestrate`
+- **Reusable prompts and skills**, including `/workflow`
 - **Browser-free web research tools** through the local `web-tools` extension
 
 ## Subagents
@@ -92,6 +92,17 @@ Generic agents and workflows are dormant by default. Enable them for one task wi
 /delegate Add organization-level API tokens
 ```
 
+`/delegate` is the umbrella command: Pi chooses whether the task needs one agent,
+several persistent subagents, or a workflow. To explicitly require a model-authored
+workflow, use:
+
+```text
+/workflow Scout this repository with five Luna agents
+```
+
+An explicit natural-language request such as “run a workflow for this task” has
+the same activation behavior as `/workflow`.
+
 The `agent`, `subagent_*`, and `workflow` tools are removed again when that run settles. The focused `scout`, `review`, and `commit` tools remain available normally.
 
 The `workflow` tool is for substantial tasks that need parallel research, phased implementation, or independent synthesis. It runs a task-specific JavaScript orchestration script with four primitives:
@@ -115,17 +126,19 @@ For example, the `personal` preset routes:
 
 Required child failures stop dependent phases rather than silently feeding them incomplete results. Schema-bound results are available when later phases need structured data.
 
-### `/orchestrate`: lean multi-agent implementation
+### `/workflow`: explicit multi-agent orchestration
 
 For a substantial implementation:
 
 ```text
-/orchestrate Add organization-level API tokens
+/workflow Add organization-level API tokens
 ```
 
-Pi uses the fewest useful agents: it skips redundant planning when an issue or review already defines the work, prefers one broad implementation owner over serial handoffs, and adds integration or final review only when risk warrants it. A human checkpoint remains for unresolved consequential decisions or destructive operations. Nothing commits automatically.
+Pi always invokes the `workflow` tool for this command. It keeps the workflow lean,
+skips redundant planning when existing context defines the work, and uses at most one
+mutating child because children share the working tree. Nothing commits automatically.
 
-Use `/skill:orchestrated-task <task>` as the direct alternative. For other large jobs, ask Pi to “use a workflow” and it will generate one for that task.
+For other large jobs, ask Pi to “use a workflow” and it will generate one for that task.
 
 ## Plans, prompts, and skills
 
@@ -145,7 +158,7 @@ Use `/skill:orchestrated-task <task>` as the direct alternative. For other large
 - personal skills from `~/dotfiles/skills`
 - all local extensions from `~/dotfiles/pi/agent/extensions`
 
-The included prompt templates expose commands such as `/orchestrate`. The local `web-tools` extension provides browser-free public web search and content retrieval.
+The included prompt templates expose commands such as `/workflow`. The local `web-tools` extension provides browser-free public web search and content retrieval.
 
 ## Shared extension structure
 
