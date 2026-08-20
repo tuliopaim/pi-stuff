@@ -1,15 +1,14 @@
 {
   "lastChangelogVersion": "0.84.2",
   "defaultProvider": "openai-codex",
-  "defaultModel": "gpt-5.6-luna",
+  "defaultModel": "gpt-5.6-sol",
   "defaultThinkingLevel": "high",
   "enabledModels": [
     "openai-codex/gpt-5.6-luna:high",
     "openai-codex/gpt-5.6-sol:medium",
     "openai-codex/gpt-5.6-terra:high",
     "opencode-go/deepseek-v4-flash:high",
-    "opencode-go/kimi-k2.7-code:high",
-    "opencode-go/minimax-m3:high"
+    "opencode-go/kimi-k2.7-code:high"
   ],
   "editorPaddingX": 2,
   "hideThinkingBlock": false,
@@ -32,7 +31,7 @@
     "presets": {
       "personal": {
         "scout": {
-          "model": "opencode-go/deepseek-v4-flash",
+          "model": "openai-codex/gpt-5.6-luna",
           "thinking": "medium"
         },
         "review": {
@@ -43,7 +42,7 @@
           ]
         },
         "commit": {
-          "model": "opencode-go/deepseek-v4-flash",
+          "model": "openai-codex/gpt-5.6-luna",
           "thinking": "medium",
           "skills": [
             "~/dotfiles/skills/commit-work"
@@ -54,7 +53,7 @@
           "routes": [
             {
               "model": "opencode-go/deepseek-v4-flash",
-              "thinking": "medium",
+              "thinking": "high",
               "guidance": "reconnaissance/routine checks"
             },
             {
@@ -83,7 +82,7 @@
       "opencode-go": {
         "scout": {
           "model": "opencode-go/deepseek-v4-flash",
-          "thinking": "medium"
+          "thinking": "high"
         },
         "review": {
           "model": "opencode-go/glm-5.2",
