@@ -77,9 +77,9 @@ import {
 } from "./runner.ts";
 import { runWorkflowSandbox } from "./sandbox.ts";
 import { safeStringify, writeFileAtomic } from "./serialization.ts";
+import { createWorkflowProgressPublisher } from "./progress.ts";
 
 const PREVIEW_LENGTH = 200;
-const EMIT_INTERVAL_MS = 120;
 
 const THINKING_LEVELS = [
   "off",
@@ -444,28 +444,16 @@ export default function workflows(pi: ExtensionAPI) {
 
       // Throttled progress: tool-block updates when blocking. Background
       // runs are covered by the below-editor indicator and /workflows.
-      let emitTimer: ReturnType<typeof setTimeout> | undefined;
-      let lastEmit = 0;
-      const flush = () => {
-        emitTimer = undefined;
-        lastEmit = Date.now();
+      const progress = createWorkflowProgressPublisher(() => {
         if (background) return;
         onUpdate?.({
           content: [{ type: "text", text: summaryLine(details) }],
           details: compactToolDetails(details),
         });
-      };
+      });
       const emit = (checkpoint = true) => {
         if (checkpoint) persistence.checkpoint();
-        if (emitTimer) return;
-        emitTimer = setTimeout(
-          flush,
-          Math.max(0, EMIT_INTERVAL_MS - (Date.now() - lastEmit)),
-        );
-      };
-      const flushNow = () => {
-        if (emitTimer) clearTimeout(emitTimer);
-        flush();
+        progress.request();
       };
 
       const phaseFn = (title: unknown) => {
@@ -672,7 +660,7 @@ export default function workflows(pi: ExtensionAPI) {
           details.error = `Artifact persistence failed: ${errorText(error)}`;
           throw new Error(details.error);
         } finally {
-          flushNow();
+          progress.flush();
         }
       };
 
