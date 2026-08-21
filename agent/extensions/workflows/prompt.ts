@@ -9,7 +9,7 @@ import {
 /** Model-facing schema descriptions for workflow source, arguments, and background mode. */
 export const WORKFLOW_PARAMETER_DESCRIPTIONS = {
   script:
-    "JavaScript workflow script. May start with `export const meta = {...}`, then use phase(), agent(), parallel(), args, and a final `return`.",
+    "JavaScript workflow script. May start with `export const meta = { name, description, phases, budget? }`, then use phase(), agent(), parallel(), args, and a final `return`. `budget` is optional `{ maxCost?, maxTokens? }`; the run fails fast when spend exceeds it.",
   args: "Optional JSON string exposed to the script as `args` (parsed when valid JSON, otherwise passed through as the raw string).",
   background:
     "Run in the background: the tool returns a run id immediately and you receive a follow-up message when the workflow finishes. Defaults to false (blocking with live progress).",
@@ -26,13 +26,15 @@ export function buildToolDescription(routesText: string): string {
     "The script runs as an async function body with these primitives:",
     "• export const meta = { name, description, phases: [{ title, detail? }] } — metadata for the progress UI. Declare all phases up front.",
     "• phase(title) — mark the current phase at runtime (use titles from meta.phases).",
-    "• await agent(prompt, { model, effort, label?, phase?, schema?, provider?, optional? }) — run ONE subagent in an isolated context and wait for it. `model` and `effort` are required; omission fails before any provider request. Use an exact `provider/model-id`, or pass `provider` separately. `effort` is off|minimal|low|medium|high|xhigh|max. Agents are required by default: after one fails, later agents are blocked and the workflow fails. Set `optional: true` only for planned best-effort read-only work whose absence does not invalidate later phases. Always resolves to { ok, output, structured?, error? }; check `ok`. With a JSON `schema`, `structured` holds the validated object. Children receive normal built-ins and trust-appropriate extensions, settings, skills, and AGENTS.md context, but cannot recursively orchestrate or ask the user.",
+    "• await agent(prompt, { model, effort, label?, id?, phase?, schema?, provider?, optional? }) — run ONE subagent in an isolated context and wait for it. `model` and `effort` are required; omission fails before any provider request. Use an exact `provider/model-id`, or pass `provider` separately. `effort` is off|minimal|low|medium|high|xhigh|max. Agents are required by default: after one fails, later agents are blocked and the workflow fails (the runner automatically retries transient upstream errors like 5xx or dropped connections exactly once before failing). Set `optional: true` only for planned best-effort read-only work whose absence does not invalidate later phases. Always resolves to { ok, output, truncated?, structured?, error? }; check `ok`, and treat `truncated` as a warning that the report was cut at 64KB. With a JSON `schema`, `structured` holds the validated object. Give agents a stable `id`: when this workflow (same meta.name) is rerun and an earlier run completed that id with an identical prompt, the stored result replays instantly without re-running the agent — put ids on expensive steps so failed runs resume cheaply. Children receive normal built-ins and trust-appropriate extensions, settings, skills, and AGENTS.md context, but cannot recursively orchestrate or ask the user.",
     "• await parallel([() => agent(...), () => agent(...)], { concurrency? }) — run zero-argument agent thunks concurrently and return results in order. Concurrency is globally capped at 4 for the run.",
     "• args — the parsed value of the `args` tool parameter (or undefined).",
     "Workflow JavaScript runs in a restricted, killable child with no imports, eval, timers, filesystem, network, or process APIs. A run may make at most 32 agent calls and has no overall deadline. Each agent must receive its first assistant response event within 45 seconds so silent provider requests fail clearly; after that, agent() has no wall-clock deadline. Each individual child tool call times out independently after 3 minutes, becomes an error tool result, and leaves the agent loop free to recover. Use map/filter/if/await/template strings to orchestrate, and `return` a JSON-serializable aggregate.",
     modelPolicy,
-    "Required-result policy: the runtime blocks later agents after a required failure. Do not retry failed calls inside the workflow by default. Let the workflow fail so the parent orchestrator can inspect the error and decide whether to retry, narrow/split the assignment, or change models. Never repeat an unchanged timeout, start a dependent or premium phase with missing findings, or automatically retry mutating agents.",
-    "Pass a `schema` to agent() whenever a later step branches on the result, so you get typed fields instead of prose. If an agent returns prose without calling structured_output, the runner gives it one same-session correction attempt before failing. There is no workflow resume. Artifacts are saved under ~/.pi/agent/workflows/<runId>/ for inspection.",
+    "Required-result policy: the runtime blocks later agents after a required failure. Do not retry failed calls inside the workflow by default — transient upstream errors are already retried once by the runner. Let the workflow fail so the parent orchestrator can inspect the error and decide whether to rerun; reruns replay completed `id`-tagged steps from cache instead of re-running them. Never repeat an unchanged timeout, start a dependent or premium phase with missing findings, or automatically retry mutating agents.",
+    "Keep plans and specs in files. Child prompts should carry pointers — file paths to read, owned files to edit, one-line goals — not inline copies of the plan. Every child already re-reads shared context from disk, so duplicating the full plan into N prompts multiplies tokens without adding information. When a plan lives in PLAN.md, tell each child which section or files it owns and let it read the rest itself.",
+    "Pass a `schema` to agent() whenever a later step branches on the result, so you get typed fields instead of prose. If an agent returns prose without calling structured_output, the runner gives it one same-session correction attempt before failing. Artifacts (script.js, transcripts.json, workflow.json) are saved under ~/.pi/agent/workflows/<runId>/ for inspection.",
+    "Resuming a failed run: read the failed run's script.js from its run dir and rerun it verbatim (fix only what failed). Replay matches agents by stable id AND exact prompt text, so rewording a prompt silently loses its cached result; keeping prompts byte-identical makes completed steps free on rerun. If an id exists in the cache with different prompt text, that step re-runs and is flagged `replayStale` in the run report.",
     "Example:",
     "export const meta = { name: 'reliability-review', description: 'Review modules for reliability risks, then report', phases: [{ title: 'Scan' }, { title: 'Report' }] }",
     "const FINDINGS = { type: 'object', properties: { issues: { type: 'array', items: { type: 'string' } }, ok: { type: 'boolean' } }, required: ['issues', 'ok'] }",
@@ -65,7 +67,8 @@ export function buildPromptGuidelines(routesText: string): string[] {
     "Subagents share the working tree. Use at most one mutating agent in a workflow; parallel fan-out must be read-only. Prefer one implementation owner for connected changes.",
     "In workflow scripts, every agent() call must explicitly set `model` and `effort`; omission fails safely before a provider request.",
     modelGuidance,
-    "Agents are required by default, so a failure mechanically blocks later agent calls. Let required failures return to the parent orchestrator for a retry decision; do not blindly retry inside the workflow. Use `optional: true` only for planned best-effort read-only work whose absence cannot affect later phases. Never feed placeholders or incomplete findings into dependent or premium phases, repeat an unchanged timeout, or automatically retry mutating agents.",
+    "Agents are required by default, so a failure mechanically blocks later agent calls. Let required failures return to the parent orchestrator for a retry decision; do not blindly retry inside the workflow (transient upstream errors are retried once automatically). Use `optional: true` only for planned best-effort read-only work whose absence cannot affect later phases. Give expensive steps stable `id`s so reruns replay them instead of paying again. Never feed placeholders or incomplete findings into dependent or premium phases, repeat an unchanged timeout, or automatically retry mutating agents.",
+    "Keep plan text in files and give children pointers (paths, owned files, goals), not inline copies of the plan; duplicate specs across N child prompts waste tokens proportionally.",
     "In workflow scripts, agent() never throws — always check `.ok` on its result before using `.output`/`.structured`.",
   ];
 }
@@ -109,8 +112,13 @@ export function buildWorkflowResultMessage(
           : agent.state === "error"
             ? "FAILED"
             : "running";
+      const flags = agent.replayed
+        ? " (replayed from cache)"
+        : agent.replayStale
+          ? " (replay missed: prompt changed)"
+          : "";
       lines.push(
-        `- [${agent.label}]${agent.phase ? ` (${agent.phase})` : ""} ${status}` +
+        `- [${agent.label}]${agent.phase ? ` (${agent.phase})` : ""} ${status}${flags}` +
           (agent.error ? ` — ${agent.error}` : ""),
       );
     }

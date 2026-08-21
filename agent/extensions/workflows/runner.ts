@@ -63,6 +63,8 @@ export interface AgentOutcome {
   ok: boolean;
   /** Final assistant text (may be empty when only structured output was produced). */
   output: string;
+  /** True when output exceeded the byte cap and was silently cut. */
+  truncated?: boolean;
   /** Captured structured_output payload when a schema was supplied. */
   structured?: unknown;
   error?: string;
@@ -566,6 +568,7 @@ export async function runAgent(
   }
 
   let output = "";
+  let truncated = false;
   let transcript: TranscriptEntry[] = [];
   try {
     if (!aborted) {
@@ -600,10 +603,9 @@ export async function runAgent(
     unsubscribe();
     unsubscribeToolTimeout?.();
     sync();
-    output = truncateUtf8(
-      finalOutput(childSession.messages),
-      AGENT_OUTPUT_MAX_BYTES,
-    );
+    const finalText = finalOutput(childSession.messages);
+    truncated = Buffer.byteLength(finalText, "utf8") > AGENT_OUTPUT_MAX_BYTES;
+    output = truncateUtf8(finalText, AGENT_OUTPUT_MAX_BYTES);
     transcript = transcriptFromMessages(childSession.messages, toolTimings);
     await shutdownAndDisposeChildSession(childSession);
   }
@@ -612,6 +614,7 @@ export async function runAgent(
     return {
       ok: false,
       output,
+      truncated,
       structured,
       error: "Agent was aborted",
       aborted: true,
@@ -627,6 +630,7 @@ export async function runAgent(
     return {
       ok: false,
       output,
+      truncated,
       structured,
       error: errorMessage ?? "Agent failed",
       aborted: false,
@@ -641,6 +645,7 @@ export async function runAgent(
     return {
       ok: false,
       output,
+      truncated,
       error:
         "Agent finished without calling structured_output; no structured result matching the schema was produced.",
       aborted: false,
@@ -654,6 +659,7 @@ export async function runAgent(
   return {
     ok: true,
     output,
+    truncated,
     structured,
     aborted: false,
     usage,
