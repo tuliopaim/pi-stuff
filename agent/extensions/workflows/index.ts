@@ -34,7 +34,7 @@ import {
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { formatActivityStatus } from "../shared/activity-status.ts";
-import { formatRouteGuidance, validateRoute as validateSubagentRoute } from "../delegation/runtime.ts";
+import { validateRoute as validateSubagentRoute } from "../delegation/runtime.ts";
 import { createWorkflowPersistence, persistWorkflowJson } from "./artifacts.ts";
 import { RunController } from "./controller.ts";
 import { sessionWorkflowRunIds, showWorkflowDashboard } from "./dashboard.ts";
@@ -377,9 +377,10 @@ export default function workflows(pi: ExtensionAPI) {
     },
   });
 
-  const routesText = formatRouteGuidance();
-  const toolDescription = buildToolDescription(routesText);
-  const toolGuidelines = buildPromptGuidelines(routesText);
+  // Route specifics are injected per-turn by registerDynamicRouteGuidance()
+  // so mid-session preset switches stay fresh; keep only behavioral guidance here.
+  const toolDescription = buildToolDescription("");
+  const toolGuidelines = buildPromptGuidelines("");
   pi.registerTool({
     name: "workflow",
     label: "Workflow",

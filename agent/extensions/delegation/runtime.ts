@@ -32,38 +32,63 @@ export function getActiveSubagentPresetName(): string | undefined {
 
 /** A subagent is enabled unless its active-preset configuration explicitly disables it. */
 export function isSubagentEnabled(name: string): boolean {
-  const presetName = getActiveSubagentPresetName();
-  const config = presetName ? subagentSettings()?.presets?.[presetName]?.[name] : undefined;
-  return !config || typeof config !== "object" || config.enabled !== false;
+  const preset = activePreset();
+  if (!preset) return true;
+  // The foreground agent tool picks models dynamically, so it opts in explicitly.
+  if (name === "agent") return preset.enableAgentTool === true;
+  const role = preset.roles?.[name];
+  return typeof role === "string" && role.length > 0;
 }
 
 export function setSubagentPreset(name: string | undefined) {
   sessionPreset = name;
 }
 
-export function getDelegationConfig(name: string, defaults: DelegationConfig): DelegationConfig {
+/** The active preset object from settings, honoring env/session overrides. */
+function activePreset(): Record<string, any> | undefined {
   const presetName = getActiveSubagentPresetName();
-  if (!presetName) return defaults;
+  return presetName ? subagentSettings()?.presets?.[presetName] : undefined;
+}
 
-  const override = subagentSettings()?.presets?.[presetName]?.[name];
-  if (!override || typeof override.model !== "string" || typeof override.thinking !== "string") {
-    throw new Error(`Subagent preset "${presetName}" has no valid "${name}" configuration`);
+/** Fixed-role subagents resolve their model through their preset's roles map. */
+export function getDelegationConfig(name: string, defaults: DelegationConfig): DelegationConfig {
+  const preset = activePreset();
+  if (!preset) return defaults;
+
+  const roleId = preset.roles?.[name];
+  const route = typeof roleId === "string"
+    ? getAgentRoutes().find((r) => r.id === roleId)
+    : undefined;
+  if (!route) {
+    throw new Error(
+      `Subagent preset "${getActiveSubagentPresetName()}" has no "${name}" role route${
+        roleId !== undefined ? ` matching id "${roleId}"` : ""
+      }`,
+    );
   }
-  if (override.skills !== undefined && (
-    !Array.isArray(override.skills) || override.skills.some((skill: unknown) => typeof skill !== "string")
+
+  const skills = preset.roleSkills?.[name]
+    ?? subagentSettings()?.shared?.roleSkills?.[name];
+  if (skills !== undefined && (
+    !Array.isArray(skills) || skills.some((skill: unknown) => typeof skill !== "string")
   )) {
-    throw new Error(`Subagent preset "${presetName}" has invalid skills for "${name}"`);
+    throw new Error(`Subagent preset "${getActiveSubagentPresetName()}" has invalid skills for "${name}"`);
   }
 
   return {
     ...defaults,
-    model: override.model,
-    thinking: override.thinking,
-    ...(override.skills === undefined ? {} : { skills: override.skills }),
+    model: route.model,
+    thinking: route.thinking,
+    ...(skills === undefined ? {} : { skills }),
   };
 }
 
+/**
+ * A single allowed child-model lane. `id` names the lane so roles can pin to
+ * it and prompts can refer to it ("use the recon lane").
+ */
 export interface AgentRoute {
+  readonly id?: string;
   readonly model: string;
   readonly thinking: string;
   readonly guidance: string;
@@ -76,47 +101,102 @@ export interface RouteValidation {
 }
 
 export function getAgentRoutes(): AgentRoute[] {
-  const presetName = getActiveSubagentPresetName();
-  if (!presetName) return [];
+  const preset = activePreset();
+  if (!preset) return [];
 
-  const routes = subagentSettings()?.presets?.[presetName]?.agent?.routes;
+  const routes = preset.routes;
   if (!Array.isArray(routes) || routes.length === 0) return [];
 
+  const seenIds = new Set<string>();
   for (let i = 0; i < routes.length; i++) {
     const r = routes[i];
     if (typeof r.model !== "string" || typeof r.thinking !== "string" || typeof r.guidance !== "string") {
       throw new Error(
-        `Subagent preset "${presetName}" agent.routes[${i}] is invalid: need model, thinking, and guidance strings`
+        `Subagent preset "${getActiveSubagentPresetName()}" routes[${i}] is invalid: need model, thinking, and guidance strings`
       );
     }
     if (!THINKING_LEVELS.has(r.thinking)) {
       throw new Error(
-        `Subagent preset "${presetName}" agent.routes[${i}] has invalid thinking level "${r.thinking}"`
+        `Subagent preset "${getActiveSubagentPresetName()}" routes[${i}] has invalid thinking level "${r.thinking}"`
       );
+    }
+    if (r.id !== undefined) {
+      if (typeof r.id !== "string" || r.id.length === 0) {
+        throw new Error(`Subagent preset "${getActiveSubagentPresetName()}" routes[${i}].id must be a non-empty string`);
+      }
+      if (seenIds.has(r.id)) {
+        throw new Error(`Subagent preset "${getActiveSubagentPresetName()}" has duplicate route id "${r.id}"`);
+      }
+      seenIds.add(r.id);
     }
   }
 
   return routes as AgentRoute[];
 }
 
+/**
+ * Renders one route as a menu line. Ids act as stable lane names the model can
+ * reason about ("spawn three recon children").
+ */
+function renderRoute(r: AgentRoute): string {
+  return `${r.id ? `${r.id}: ` : ""}${r.model}:${r.thinking} — ${r.guidance}`;
+}
+
 export function validateRoute(model: string, thinking: string): RouteValidation {
   const routes = getAgentRoutes();
   if (routes.length === 0) return { allowed: true }; // no routes configured = unrestricted
+  if (activePreset()?.offRoute === "allow") return { allowed: true }; // guidance-only mode
 
   const match = routes.find((r) => r.model === model && r.thinking === thinking);
   if (match) return { allowed: true };
 
-  const formatted = routes.map((r) => `  ${r.model}:${r.thinking} — ${r.guidance}`).join("\n");
+  const formatted = routes.map((r) => `  ${renderRoute(r)}`).join("\n");
   return {
     allowed: false,
     error: `"${model}:${thinking}" is not in the active preset routes.\nAvailable routes:\n${formatted}`,
   };
 }
 
+/**
+ * Shared child-model selection guidance derived from the active preset's
+ * agent routes. Empty when no routes are configured (unrestricted).
+ */
+export function modelSelectionGuidelines(): string[] {
+  const routes = getAgentRoutes();
+  if (routes.length === 0) return [];
+  return [
+    "When choosing a model and thinking level for a delegated child, pick from the active preset routes:",
+    ...routes.map(renderRoute),
+  ];
+}
+
+/** Tools whose model selection must reflect the live preset rather than startup state. */
+const DYNAMIC_MODEL_TOOLS = new Set(["agent", "subagent_spawn", "workflow"]);
+
+/**
+ * Injects the active preset's child-model routes into the system prompt of
+ * every turn where a dynamic-model delegation tool is armed. Registration-time
+ * tool metadata cannot track mid-session `/subagent-preset` switches; this
+ * per-turn patch can, because event.systemPrompt is rebuilt fresh each turn.
+ */
+export function registerDynamicRouteGuidance(pi: ExtensionAPI): void {
+  pi.on("before_agent_start", (event) => {
+    const armed = pi
+      .getActiveTools()
+      .some((name) => DYNAMIC_MODEL_TOOLS.has(name));
+    if (!armed) return undefined;
+    const lines = modelSelectionGuidelines();
+    if (lines.length === 0) return undefined;
+    return {
+      systemPrompt: `${event.systemPrompt}\n\n## Delegated child model routes (active subagent preset)\n${lines.join("\n")}`,
+    };
+  });
+}
+
 export function formatRouteGuidance(): string {
   const routes = getAgentRoutes();
   if (routes.length === 0) return "";
-  return routes.map((r) => `${r.model}:${r.thinking} — ${r.guidance}`).join("\n");
+  return routes.map(renderRoute).join("\n");
 }
 
 export interface DelegationConfig {

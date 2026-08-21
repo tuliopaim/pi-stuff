@@ -17,6 +17,7 @@ import {
   getSubagentPresetNames,
   isSubagentEnabled,
   registerDelegatedTool,
+  registerDynamicRouteGuidance,
   setSubagentPreset,
   validateRoute,
   type DelegationDetails,
@@ -158,7 +159,6 @@ const AGENT: DelegationPolicy = {
     "Use the fewest agents that materially reduce context, uncertainty, or elapsed time: default to zero for clear local work, and use one for a self-contained delegated workstream.",
     "Use agent when the user asks to delegate, or when one agent can independently own a substantial implementation or investigation while the parent avoids overlapping edits.",
     "Do not split connected implementation across agents in one working tree. Fan out only independent read-only work, or mutating work in separate working trees.",
-    "When calling agent, choose its model and thinking level for the task: opencode-go/deepseek-v4-flash with medium for reconnaissance or diagnosis; opencode-go/kimi-k2.7-code with high for routine or clearly scoped implementation; openai-codex/gpt-5.6-sol with medium for difficult implementation, ambiguous behavior, architecture-sensitive changes, or hard debugging; openai-codex/gpt-5.6-sol with high for consequential planning, adversarial review, security, or data-loss work.",
     "The agent inherits extensions, skills, and project context. Give it a self-contained task with the intended behavior and validation requirements.",
     "Run agent synchronously and do not edit the same working tree while it is running.",
   ],
@@ -178,6 +178,7 @@ export default function (
     = (ctx, parentSessionId, onSettled) => new SubagentManager(ctx, parentSessionId, onSettled),
 ) {
   if (process.env.PI_DELEGATED === "1") return;
+  registerDynamicRouteGuidance(pi);
 
   let manager: SubagentManager | undefined;
   let context: ExtensionContext | undefined;
@@ -352,6 +353,7 @@ export default function (
       "Default to no background subagent for clear local work. Spawn one only when it can proceed independently without overlapping the parent's edits.",
       "Use two to four only for genuinely independent workstreams in separate working trees. For parallel read-only fan-out in one tree, use workflow instead.",
       "Treat four as a hard ceiling, not a target. Wait for results only when the parent needs them for its next decision.",
+      "Choose each child's model and thinking level from the active subagent preset routes.",
     ],
     parameters: Type.Object({
       task: Type.String({ description: "Self-contained task" }),

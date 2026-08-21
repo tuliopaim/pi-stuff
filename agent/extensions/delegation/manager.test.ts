@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { SubagentManager, type SpawnOptions } from "./manager.ts";
-import { reconcileDashboardSelection, sanitizeTerminalText, Takeover } from "./dashboard.ts";
+import { reconcileDashboardSelection, renderTimelineBar, sanitizeTerminalText, Takeover } from "./dashboard.ts";
 
 class FakeSession {
   messages: any[] = [];
@@ -429,6 +429,12 @@ test("dashboard selection follows a stable ID across list updates", () => {
   assert.deepEqual(selection, { id: "sa_b", index: 0 });
 });
 
+test("dashboard timeline places completed and running agents in a shared time window", () => {
+  const window = { start: 1_000, end: 5_000 };
+  assert.equal(renderTimelineBar({ createdAt: 1_000, settledAt: 3_000, status: "done" }, window, 9), "├━━━┤    ");
+  assert.equal(renderTimelineBar({ createdAt: 3_000, status: "running" }, window, 9), "    ├━━━▶");
+});
+
 test("takeover sends follow-ups and exposes an explicit abort action", async () => {
   const sent: string[] = [];
   const cancelled: string[][] = [];
@@ -477,7 +483,7 @@ test("takeover supports vim log navigation without stealing input mode", () => {
   assert.equal((takeover as any).offset, 0);
   takeover.handleInput("g");
   assert.equal((takeover as any).offset, Number.MAX_SAFE_INTEGER);
-  takeover.handleInput("l");
+  takeover.handleInput("i");
   takeover.handleInput("j");
   assert.equal((takeover as any).input.getValue(), "j");
   (takeover as any).inputMode = false;
@@ -486,7 +492,7 @@ test("takeover supports vim log navigation without stealing input mode", () => {
   takeover.dispose();
 });
 
-test("takeover renders failure details and recent tool activity", () => {
+test("takeover renders a compact session header and failure details without duplicating activity", () => {
   const snapshot: any = {
     id: "sa_failed", title: "failed agent", status: "failed", error: "model failed", activities: ["read src/a.ts", "✗ bash"],
     createdAt: Date.now(), settledAt: Date.now(), model: "test/model", thinking: "high", transcript: [], liveThinking: "", liveText: "", queued: [],
@@ -497,9 +503,43 @@ test("takeover renders failure details and recent tool activity", () => {
   const theme: any = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
   const takeover = new Takeover(tui, theme, { matches: () => false } as any, manager, snapshot.id, () => {});
   const rendered = takeover.render(100).join("\n");
-  assert.match(rendered, /RECENT ACTIVITY/);
-  assert.match(rendered, /read src\/a\.ts/);
-  assert.match(rendered, /ERROR: model failed/);
+  assert.match(rendered, /‹ Subagents \/ failed agent/);
+  assert.doesNotMatch(rendered, /RECENT ACTIVITY|read src\/a\.ts/);
+  assert.match(rendered, /model failed/);
   assert.match(rendered, /4%\/272k/);
+  takeover.dispose();
+});
+
+test("takeover reads like a session and hides the guidance editor until requested", () => {
+  const snapshot: any = {
+    id: "sa_session", origin: "scout", title: "inspect timeline", status: "done",
+    createdAt: Date.now() - 2_000, settledAt: Date.now(), model: "test/model", thinking: "high",
+    transcript: [
+      { role: "user", text: "Inspect the timeline renderer." },
+      { role: "thinking", text: "I should read the dashboard." },
+      { role: "tool", name: "read", text: JSON.stringify({ path: "delegation/dashboard.ts" }) },
+      { role: "toolResult", name: "read", text: "first line\nsecond line\nthird line" },
+      { role: "assistant", text: "## Result\nThe timeline uses a shared window." },
+    ],
+    liveThinking: "", liveText: "", queued: [], activities: ["read delegation/dashboard.ts"],
+    usage: { contextTokens: 12_000, contextWindow: 272_000 },
+  };
+  const takeover = new Takeover(
+    { terminal: { rows: 30 }, requestRender() {} } as any,
+    { fg: (_color: string, text: string) => text, bold: (text: string) => text } as any,
+    { matches: () => false } as any,
+    { subscribeTo: () => () => {}, get: () => snapshot } as any,
+    snapshot.id,
+    () => {},
+  );
+
+  const rendered = takeover.render(100).join("\n");
+  assert.match(rendered, /Task/);
+  assert.match(rendered, /read  delegation\/dashboard\.ts/);
+  assert.match(rendered, /… 1 more line/);
+  assert.match(rendered, /Result/);
+  assert.doesNotMatch(rendered, /Send guidance/);
+  takeover.handleInput("i");
+  assert.match(takeover.render(100).join("\n"), /Send guidance/);
   takeover.dispose();
 });

@@ -28,7 +28,13 @@ function withAgentEnabled<T>(run: () => T): T {
   try {
     writeFileSync(join(dir, "settings.json"), JSON.stringify({
       subagents: { preset: "test", presets: { test: {
-        agent: { model: "opencode-go/kimi-k2.7-code", thinking: "high", routes: [] },
+        enableAgentTool: true,
+        routes: [
+          { id: "workhorse", model: "opencode-go/kimi-k2.7-code", thinking: "high", guidance: "implementation" },
+          { id: "deep", model: "openai-codex/gpt-5.6-sol", thinking: "high", guidance: "review and planning" },
+          { id: "mechanical", model: "openai-codex/gpt-5.6-luna", thinking: "medium", guidance: "mechanical delegated work" },
+        ],
+        roles: { scout: "mechanical", review: "deep", commit: "mechanical", agent: "workhorse" },
       } } },
     }));
     process.env.PI_CODING_AGENT_DIR = dir;
@@ -70,9 +76,9 @@ test("model guidance scales delegation by independent workstreams", () => {
   assert.match(workflow, /do not replace it with direct `agent`/);
 
   const settings = JSON.parse(readFileSync(join(process.cwd(), "settings.json"), "utf8"));
-  assert.ok(settings.subagents.presets.personal.agent.routes.some((route: any) =>
+  assert.ok(settings.subagents.presets.personal.routes.some((route: any) =>
     route.model === "openai-codex/gpt-5.6-luna" && route.thinking === "high"));
-  assert.ok(settings.subagents.presets.copilot.agent.routes.some((route: any) =>
+  assert.ok(settings.subagents.presets.copilot.routes.some((route: any) =>
     route.model === "github-copilot/gpt-5.6-luna" && route.thinking === "high"));
 });
 
@@ -108,7 +114,16 @@ test("does not register predefined policies explicitly disabled in settings", ()
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   try {
     writeFileSync(join(dir, "settings.json"), JSON.stringify({
-      subagents: { preset: "test", presets: { test: { scout: { enabled: false }, commit: { enabled: false } } } },
+      subagents: {
+        preset: "test",
+        presets: {
+          test: {
+            enableAgentTool: true,
+            routes: [{ id: "deep", model: "openai-codex/gpt-5.6-sol", thinking: "high", guidance: "review" }],
+            roles: { review: "deep" },
+          },
+        },
+      },
     }));
     process.env.PI_CODING_AGENT_DIR = dir;
     setSubagentPreset(undefined);
