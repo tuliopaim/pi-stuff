@@ -27,180 +27,165 @@
   ],
   "subagents": {
     "preset": "personal",
+    "shared": {
+      "roleSkills": {
+        "review": [
+          "*"
+        ],
+        "commit": [
+          "~/dotfiles/skills/commit-work"
+        ]
+      }
+    },
     "presets": {
       "personal": {
-        "scout": {
-          "model": "openai-codex/gpt-5.6-luna",
-          "thinking": "medium"
-        },
-        "review": {
-          "model": "openai-codex/gpt-5.6-sol",
-          "thinking": "high",
-          "skills": [
-            "*"
-          ]
-        },
-        "commit": {
-          "model": "openai-codex/gpt-5.6-luna",
-          "thinking": "medium",
-          "skills": [
-            "~/dotfiles/skills/commit-work"
-          ]
-        },
-        "agent": {
-          "enabled": false,
-          "routes": [
-            {
-              "model": "opencode-go/deepseek-v4-flash",
-              "thinking": "high",
-              "guidance": "reconnaissance/routine checks"
-            },
-            {
-              "model": "openai-codex/gpt-5.6-luna",
-              "thinking": "high",
-              "guidance": "explicitly requested fast parallel reconnaissance or routine work"
-            },
-            {
-              "model": "opencode-go/kimi-k2.7-code",
-              "thinking": "high",
-              "guidance": "routine or clearly scoped implementation"
-            },
-            {
-              "model": "openai-codex/gpt-5.6-sol",
-              "thinking": "medium",
-              "guidance": "difficult implementation, ambiguous behavior, architecture-sensitive changes, or hard debugging"
-            },
-            {
-              "model": "openai-codex/gpt-5.6-sol",
-              "thinking": "high",
-              "guidance": "consequential planning, adversarial review, security, or data-loss work"
-            }
-          ]
+        "routes": [
+          {
+            "id": "recon",
+            "model": "opencode-go/deepseek-v4-flash",
+            "thinking": "high",
+            "guidance": "reconnaissance/routine checks"
+          },
+          {
+            "id": "fast",
+            "model": "openai-codex/gpt-5.6-luna",
+            "thinking": "high",
+            "guidance": "explicitly requested fast parallel reconnaissance or routine work"
+          },
+          {
+            "id": "mechanical",
+            "model": "openai-codex/gpt-5.6-luna",
+            "thinking": "medium",
+            "guidance": "commit grouping, formatting, and other mechanical delegated work"
+          },
+          {
+            "id": "implement",
+            "model": "opencode-go/kimi-k2.7-code",
+            "thinking": "high",
+            "guidance": "routine or clearly scoped implementation"
+          },
+          {
+            "id": "integrate",
+            "model": "openai-codex/gpt-5.6-terra",
+            "thinking": "high",
+            "guidance": "moderate-to-hard implementation, integration across modules, ambiguous behavior"
+          },
+          {
+            "id": "ox",
+            "model": "opencode-go/ox-alpha-free",
+            "thinking": "high",
+            "guidance": "long multi-step implementations, medium/large plan execution, cross-module refactors, or hard debugging where broad working-tree context pays off"
+          },
+          {
+            "id": "hard",
+            "model": "openai-codex/gpt-5.6-sol",
+            "thinking": "medium",
+            "guidance": "difficult implementation, architecture-sensitive changes, or hard debugging"
+          },
+          {
+            "id": "deep",
+            "model": "openai-codex/gpt-5.6-sol",
+            "thinking": "high",
+            "guidance": "consequential planning, adversarial review, security, or data-loss work"
+          }
+        ],
+        "roles": {
+          "scout": "recon",
+          "commit": "mechanical",
+          "review": "deep"
         }
       },
       "opencode-go": {
-        "scout": {
-          "model": "opencode-go/deepseek-v4-flash",
-          "thinking": "high"
-        },
-        "review": {
-          "model": "opencode-go/glm-5.2",
-          "thinking": "high",
-          "skills": [
-            "*"
-          ]
-        },
-        "commit": {
-          "model": "opencode-go/kimi-k2.7-code",
-          "thinking": "high",
-          "skills": [
-            "~/dotfiles/skills/commit-work"
-          ]
-        },
-        "agent": {
-          "enabled": false,
-          "routes": [
-            {
-              "model": "opencode-go/deepseek-v4-flash",
-              "thinking": "medium",
-              "guidance": "reconnaissance/routine checks"
-            },
-            {
-              "model": "opencode-go/kimi-k2.7-code",
-              "thinking": "high",
-              "guidance": "routine or clearly scoped implementation"
-            },
-            {
-              "model": "opencode-go/kimi-k3",
-              "thinking": "max",
-              "guidance": "planning or consequential final review"
-            }
-          ]
+        "routes": [
+          {
+            "id": "recon",
+            "model": "opencode-go/deepseek-v4-flash",
+            "thinking": "medium",
+            "guidance": "reconnaissance/routine checks"
+          },
+          {
+            "id": "implement",
+            "model": "opencode-go/kimi-k2.7-code",
+            "thinking": "high",
+            "guidance": "routine or clearly scoped implementation"
+          },
+          {
+            "id": "review",
+            "model": "opencode-go/glm-5.2",
+            "thinking": "high",
+            "guidance": "code review"
+          },
+          {
+            "id": "deep",
+            "model": "opencode-go/kimi-k3",
+            "thinking": "max",
+            "guidance": "planning or consequential final review"
+          }
+        ],
+        "roles": {
+          "scout": "recon",
+          "review": "review",
+          "commit": "implement"
         }
       },
       "openai": {
-        "scout": {
-          "model": "openai-codex/gpt-5.6-luna",
-          "thinking": "low"
-        },
-        "review": {
-          "model": "openai-codex/gpt-5.6-sol",
-          "thinking": "high",
-          "skills": [
-            "*"
-          ]
-        },
-        "commit": {
-          "model": "openai-codex/gpt-5.6-terra",
-          "thinking": "medium",
-          "skills": [
-            "~/dotfiles/skills/commit-work"
-          ]
-        },
-        "agent": {
-          "enabled": false,
-          "routes": [
-            {
-              "model": "openai-codex/gpt-5.6-luna",
-              "thinking": "low",
-              "guidance": "reconnaissance/routine checks"
-            },
-            {
-              "model": "openai-codex/gpt-5.6-terra",
-              "thinking": "medium",
-              "guidance": "implementation and integration"
-            },
-            {
-              "model": "openai-codex/gpt-5.6-sol",
-              "thinking": "high",
-              "guidance": "planning or consequential final review"
-            }
-          ]
+        "routes": [
+          {
+            "id": "recon",
+            "model": "openai-codex/gpt-5.6-luna",
+            "thinking": "low",
+            "guidance": "reconnaissance/routine checks"
+          },
+          {
+            "id": "implement",
+            "model": "openai-codex/gpt-5.6-terra",
+            "thinking": "medium",
+            "guidance": "implementation and integration"
+          },
+          {
+            "id": "deep",
+            "model": "openai-codex/gpt-5.6-sol",
+            "thinking": "high",
+            "guidance": "planning or consequential final review"
+          }
+        ],
+        "roles": {
+          "scout": "recon",
+          "review": "deep",
+          "commit": "implement"
         }
       },
       "copilot": {
-        "scout": {
-          "model": "github-copilot/gpt-5.4-mini",
-          "thinking": "medium"
-        },
-        "review": {
-          "model": "github-copilot/gpt-5.6-sol",
-          "thinking": "high",
-          "skills": [
-            "*"
-          ]
-        },
-        "commit": {
-          "model": "github-copilot/gpt-5.4-mini",
-          "thinking": "medium",
-          "skills": [
-            "~/dotfiles/skills/commit-work"
-          ]
-        },
-        "agent": {
-          "enabled": false,
-          "routes": [
-            {
-              "model": "github-copilot/gpt-5.4-mini",
-              "thinking": "medium",
-              "guidance": "reconnaissance/routine checks"
-            },
-            {
-              "model": "github-copilot/gpt-5.6-luna",
-              "thinking": "high",
-              "guidance": "explicitly requested fast parallel reconnaissance or routine work"
-            },
-            {
-              "model": "github-copilot/gpt-5.6-terra",
-              "thinking": "medium",
-              "guidance": "implementation and integration"
-            },
-            {
-              "model": "github-copilot/gpt-5.6-sol",
-              "thinking": "high",
-              "guidance": "difficult planning or consequential review"
-            }
-          ]
+        "routes": [
+          {
+            "id": "recon",
+            "model": "github-copilot/gpt-5.4-mini",
+            "thinking": "medium",
+            "guidance": "reconnaissance/routine checks"
+          },
+          {
+            "id": "fast",
+            "model": "github-copilot/gpt-5.6-luna",
+            "thinking": "high",
+            "guidance": "explicitly requested fast parallel reconnaissance or routine work"
+          },
+          {
+            "id": "implement",
+            "model": "github-copilot/gpt-5.6-terra",
+            "thinking": "medium",
+            "guidance": "implementation and integration"
+          },
+          {
+            "id": "deep",
+            "model": "github-copilot/gpt-5.6-sol",
+            "thinking": "high",
+            "guidance": "difficult planning or consequential review"
+          }
+        ],
+        "roles": {
+          "scout": "recon",
+          "review": "deep",
+          "commit": "recon"
         }
       }
     }
