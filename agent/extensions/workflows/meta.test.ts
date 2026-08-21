@@ -49,3 +49,34 @@ test("executable and unsupported metadata fail closed", () => {
     { phases: [] },
   );
 });
+
+test("prepareWorkflowScript parses an optional meta.budget", () => {
+  const source = [
+    "export const meta = {",
+    "  name: 'budgeted',",
+    "  phases: [{ title: 'One' }],",
+    "  budget: { maxCost: 1.5, maxTokens: 200000 },",
+    "}",
+    "return await agent('x', {})",
+  ].join("\n");
+  const { meta } = prepareWorkflowScript(source);
+  assert.deepEqual(meta.budget, { maxCost: 1.5, maxTokens: 200000 });
+});
+
+test("prepareWorkflowScript drops invalid budgets and rejects non-literals", () => {
+  for (const budget of ["{ maxTokens: 'lots' }", "7"]) {
+    const source = `export const meta = { name: 'b', phases: [], budget: ${budget} }\nreturn 1`;
+    const { meta } = prepareWorkflowScript(source);
+    assert.equal(meta.budget, undefined, String(budget));
+  }
+  // Negative numbers are UnaryExpressions, rejected by the static literal parser.
+  assert.throws(
+    () =>
+      prepareWorkflowScript(
+        "export const meta = { phases: [], budget: { maxCost: -3 } }\nreturn 1",
+      ),
+    /static literals/,
+  );
+  const noBudget = prepareWorkflowScript("export const meta = { phases: [] }\nreturn 1");
+  assert.equal(noBudget.meta.budget, undefined);
+});

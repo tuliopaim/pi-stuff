@@ -17,8 +17,9 @@
  * Runs are blocking by default (live progress in the tool block). Pass
  * `background: true` to return immediately and get a follow-up message when
  * the run finishes. Run artifacts (script, args, statuses, result) are saved
- * under `~/.pi/agent/workflows/<runId>/` for inspection; result and bounded
- * transcripts use separate artifacts, and there is no resume.
+ * under `~/.pi/agent/workflows/<runId>/` for inspection. Agents given a
+ * stable `id` are replayed from a shared cache on reruns instead of
+ * re-executing, and transient provider errors are retried once automatically.
  */
 
 import { randomBytes } from "node:crypto";
@@ -76,6 +77,17 @@ import {
   type WorkflowModel,
 } from "./runner.ts";
 import { runWorkflowSandbox } from "./sandbox.ts";
+import {
+  budgetExceededMessage,
+  isTransientProviderError,
+  loadReplayCache,
+  mergeUsage,
+  promptHash,
+  replayKey,
+  saveReplayEntry,
+  sanitizeBudget,
+  type ReplayCache,
+} from "./reliability.ts";
 import { safeStringify, writeFileAtomic } from "./serialization.ts";
 import { createWorkflowProgressPublisher } from "./progress.ts";
 
@@ -95,12 +107,15 @@ const THINKING_LEVELS = [
 interface ScriptAgentResult {
   ok: boolean;
   output: string;
+  truncated?: boolean;
   structured?: unknown;
   error?: string;
 }
 
 export interface AgentCallOptions {
   label?: unknown;
+  /** Stable identity for replay: reruns with the same id + prompt skip re-running. */
+  id?: unknown;
   phase?: unknown;
   schema?: unknown;
   model?: unknown;
@@ -118,6 +133,10 @@ export function validateAgentSelection(opts: AgentCallOptions): string | undefin
     return "`effort` is required";
   if (!(THINKING_LEVELS as readonly string[]).includes(opts.effort))
     return `invalid effort "${opts.effort}" (use ${THINKING_LEVELS.join("|")})`;
+  if (opts.id !== undefined) {
+    if (typeof opts.id !== "string" || !opts.id.trim())
+      return '`id` must be a non-empty string when provided';
+  }
 }
 
 const WorkflowParams = Type.Object({
@@ -409,6 +428,12 @@ export default function workflows(pi: ExtensionAPI) {
       const meta = prepared.meta;
       const runId = `wf_${randomBytes(6).toString("hex")}`;
       const runDir = path.join(getAgentDir(), "workflows", runId);
+      // Reruns of a workflow with the same meta.name (or same source) share a
+      // replay cache so completed agents with stable ids skip re-execution.
+      const workflowsDir = path.dirname(runDir);
+      const resumeKey = replayKey(meta.name, prepared.source);
+      const replayCache: ReplayCache = loadReplayCache(workflowsDir, resumeKey);
+      const budget = sanitizeBudget(meta.budget);
       const background = (params.background ?? false) && ctx.hasUI;
 
       const details: WorkflowDetails = {
@@ -467,6 +492,7 @@ export default function workflows(pi: ExtensionAPI) {
 
       let agentCounter = 0;
       let blockingFailure: string | undefined;
+      let budgetFailure: string | undefined;
       const agentFn = async (
         promptValue: unknown,
         optsValue: unknown = {},
@@ -485,6 +511,7 @@ export default function workflows(pi: ExtensionAPI) {
         const record: AgentRecord = {
           index,
           label,
+          ...(typeof opts.id === "string" ? { id: opts.id } : {}),
           phase:
             typeof opts.phase === "string"
               ? opts.phase.slice(0, 160)
@@ -522,9 +549,35 @@ export default function workflows(pi: ExtensionAPI) {
         if (!prompt.trim())
           return fail("agent() requires a non-empty prompt string");
         const selectionError = validateAgentSelection(opts);
-        if (selectionError) return fail(`agent "${label}": ${selectionError}`);
+        if (selectionError) return fail(selectionError);
         if (controller.signal.aborted)
           return fail("Workflow was aborted before this agent started");
+
+        // Replay: a completed result from an earlier run of this workflow with
+        // the same stable id + identical prompt skips execution entirely.
+        if (typeof opts.id === "string") {
+          const variants = replayCache[opts.id];
+          const hit = variants?.find(
+            (candidate) =>
+              candidate.ok && candidate.promptHash === promptHash(prompt),
+          );
+          if (hit) {
+            record.state = "done";
+            record.replayed = true;
+            record.finishedAt = Date.now();
+            emit();
+            return {
+              ok: true,
+              output: hit.output,
+              ...(hit.structured !== undefined
+                ? { structured: hit.structured }
+                : {}),
+            };
+          }
+          // Same id, different task text: refuse to serve an old result,
+          // but tell the orchestrator why it is paying for this step again.
+          if (variants?.length) record.replayStale = true;
+        }
 
         return controller
           .schedule(async (runSignal) => {
@@ -545,9 +598,7 @@ export default function workflows(pi: ExtensionAPI) {
               const requested = providerOpt
                 ? `${providerOpt}/${modelOpt}`
                 : modelOpt;
-              return fail(
-                `agent "${label}": unknown model "${requested}" (use provider/id)`,
-              );
+              return fail(`unknown model "${requested}" (use provider/id)`);
             }
             record.model = model?.id;
             record.contextWindow = model?.contextWindow;
@@ -558,30 +609,49 @@ export default function workflows(pi: ExtensionAPI) {
             // Check active preset routes if configured
             {
               const v = validateSubagentRoute(modelOpt, thinkingLevel);
-              if (!v.allowed) return fail(`agent "${label}": ${v.error}`);
+              if (!v.allowed) return fail(v.error);
             }
 
             const resources = await getResources(opts.schema !== undefined);
-            const outcome = await runAgent({
-              prompt,
-              schema: opts.schema,
-              model,
-              thinkingLevel,
-              cwd: ctx.cwd,
-              loader: resources.loader,
-              settingsManager: resources.settingsManager,
-              modelRegistry: ctx.modelRegistry,
-              signal: runSignal,
-              onProgress: (progress) => {
-                record.preview = progress.preview.slice(0, PREVIEW_LENGTH);
-                record.usage = progress.usage;
-                record.model = progress.model ?? record.model;
-                record.contextWindow =
-                  progress.contextWindow ?? record.contextWindow;
-                record.transcript = progress.transcript;
-                emit();
-              },
-            });
+            const attempt = () =>
+              runAgent({
+                prompt,
+                schema: opts.schema,
+                model,
+                thinkingLevel,
+                cwd: ctx.cwd,
+                loader: resources.loader,
+                settingsManager: resources.settingsManager,
+                modelRegistry: ctx.modelRegistry,
+                signal: runSignal,
+                onProgress: (progress) => {
+                  record.preview = progress.preview.slice(0, PREVIEW_LENGTH);
+                  record.usage = progress.usage;
+                  record.model = progress.model ?? record.model;
+                  record.contextWindow =
+                    progress.contextWindow ?? record.contextWindow;
+                  record.transcript = progress.transcript;
+                  emit();
+                },
+              });
+
+            let outcome = await attempt();
+            // One automatic retry when the failure looks like a transient
+            // upstream/provider error (5xx, dropped connections, rate limits).
+            // Aborts and genuine task failures are never retried.
+            if (
+              !outcome.ok &&
+              !outcome.aborted &&
+              isTransientProviderError(outcome.error)
+            ) {
+              record.retries = 1;
+              emit(false);
+              const second = await attempt();
+              outcome = {
+                ...second,
+                usage: mergeUsage(outcome.usage, second.usage),
+              };
+            }
 
             record.usage = outcome.usage;
             record.model = outcome.model ?? record.model;
@@ -596,16 +666,40 @@ export default function workflows(pi: ExtensionAPI) {
             record.state = outcome.ok ? "done" : "error";
             if (outcome.ok) {
               delete record.error;
+              if (typeof opts.id === "string") {
+                const entry = {
+                  promptHash: promptHash(prompt),
+                  label,
+                  ok: true,
+                  output: outcome.output,
+                  ...(outcome.structured !== undefined
+                    ? { structured: outcome.structured }
+                    : {}),
+                };
+                replayCache[opts.id] = entry;
+                saveReplayEntry(workflowsDir, resumeKey, opts.id, entry);
+              }
             } else {
               record.error = outcome.error ?? "Agent failed";
               if (opts.optional !== true)
                 blockingFailure ??= `agent "${label}": ${record.error}`;
+            }
+            if (budget && !budgetFailure) {
+              const over = budgetExceededMessage(
+                budget,
+                aggregateUsage(details.agents),
+              );
+              if (over) {
+                budgetFailure = over;
+                blockingFailure ??= over;
+              }
             }
             emit();
 
             return {
               ok: outcome.ok,
               output: outcome.output,
+              ...(outcome.truncated ? { truncated: true } : {}),
               ...(outcome.structured !== undefined
                 ? { structured: outcome.structured }
                 : {}),
@@ -626,7 +720,10 @@ export default function workflows(pi: ExtensionAPI) {
             onAgent: agentFn,
             onPhase: phaseFn,
           });
-          if (blockingFailure) {
+          if (budgetFailure) {
+            details.error = budgetFailure;
+            status = "failed";
+          } else if (blockingFailure) {
             details.error = `Required agent failed: ${blockingFailure}`;
             status = "failed";
           }

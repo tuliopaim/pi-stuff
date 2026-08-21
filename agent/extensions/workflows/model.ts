@@ -63,8 +63,16 @@ export interface TranscriptEntry {
 export interface AgentRecord {
   index: number;
   label: string;
+  /** Stable caller-supplied identity used for replay across reruns. */
+  id?: string;
   phase?: string;
   state: AgentState;
+  /** True when the result was served from a previous run's replay cache. */
+  replayed?: boolean;
+  /** True when an id matched the replay cache but the prompt changed, forcing re-execution. */
+  replayStale?: boolean;
+  /** Number of automatic transient-error retries consumed by this agent. */
+  retries?: number;
   model?: string;
   /** Context capacity of the active model used for this agent. */
   contextWindow?: number;

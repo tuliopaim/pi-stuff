@@ -10,6 +10,7 @@ import {
   type Property,
   type VariableDeclaration,
 } from "acorn";
+import { sanitizeBudget } from "./reliability.ts";
 
 /** Static workflow metadata and source preparation helpers. */
 
@@ -22,6 +23,8 @@ export interface WorkflowMeta {
   name?: string;
   description?: string;
   phases: WorkflowPhase[];
+  /** Optional spend guardrails; the run fails fast when either is exceeded. */
+  budget?: { maxCost?: number; maxTokens?: number };
 }
 
 export interface PreparedWorkflowScript {
@@ -121,6 +124,7 @@ function sanitizeMeta(value: unknown): WorkflowMeta {
     name?: unknown;
     description?: unknown;
     phases?: unknown;
+    budget?: unknown;
   };
   if (typeof raw.name === "string") meta.name = raw.name.slice(0, 160);
   if (typeof raw.description === "string") {
@@ -138,6 +142,10 @@ function sanitizeMeta(value: unknown): WorkflowMeta {
           : {}),
       });
     }
+  }
+  if (raw.budget !== undefined) {
+    const budget = sanitizeBudget(raw.budget);
+    if (budget) meta.budget = budget;
   }
   return meta;
 }

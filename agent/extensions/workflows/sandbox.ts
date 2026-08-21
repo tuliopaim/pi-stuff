@@ -93,6 +93,7 @@ function sanitizeAgentOptions(value: unknown): SandboxAgentOptions {
   if (!isRecord(value)) return {};
   return {
     ...(value.label !== undefined ? { label: value.label } : {}),
+    ...(value.id !== undefined ? { id: value.id } : {}),
     ...(value.phase !== undefined ? { phase: value.phase } : {}),
     ...(value.schema !== undefined ? { schema: value.schema } : {}),
     ...(value.model !== undefined ? { model: value.model } : {}),
