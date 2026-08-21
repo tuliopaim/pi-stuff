@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentUsage } from "./model.ts";
@@ -14,6 +15,8 @@ import { writeFileAtomic } from "./serialization.ts";
 /** Patterns matching transient upstream/provider failures worth one retry. */
 const TRANSIENT_ERROR_PATTERNS: RegExp[] = [
   /^5\d{2}\s*[:;]/, // "503: {...}", "500: internal"
+  /^HTTP\s+5\d{2}\b/i, // "HTTP 503 Service Unavailable"
+  /\b5\d{2}\s*(bad gateway|service unavailable|internal server error|gateway timeout)/i,
   /\bserver error\b/i,
   /upstream request failed/i,
   /\b(ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|EAI_AGAIN)\b/,
@@ -51,14 +54,9 @@ export function mergeUsage(a: AgentUsage, b: AgentUsage): AgentUsage {
   };
 }
 
-/** Stable FNV-1a 32-bit hash rendered as hex. Not cryptographic — collision avoidance only. */
-function fnv1a(value: string): string {
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < value.length; i++) {
-    hash ^= value.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return (hash >>> 0).toString(16).padStart(8, "0");
+/** Collision-resistant content hash rendered as hex (first 128 bits of SHA-256). */
+function stableHash(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex").slice(0, 32);
 }
 
 /**
@@ -67,11 +65,11 @@ function fnv1a(value: string): string {
  */
 export function replayKey(name: string | undefined, source: string): string {
   const basis = name?.trim() ? `name:${name.trim()}` : `source:${source}`;
-  return fnv1a(basis);
+  return stableHash(basis);
 }
 
 export function promptHash(prompt: string): string {
-  return fnv1a(prompt);
+  return stableHash(prompt);
 }
 
 const REPLAY_MAX_IDS = 64;
@@ -85,6 +83,8 @@ export interface ReplayEntry {
   label?: string;
   ok: boolean;
   output: string;
+  /** Preserved so replayed results still carry the truncation warning. */
+  truncated?: boolean;
   structured?: unknown;
 }
 
@@ -97,11 +97,12 @@ export function replayPath(baseDir: string, key: string): string {
 /** Load a replay cache; any corruption or absence yields an empty cache. */
 export function loadReplayCache(baseDir: string, key: string): ReplayCache {
   try {
+    const empty: ReplayCache = Object.create(null);
     const raw = fs.readFileSync(replayPath(baseDir, key), "utf8");
-    if (raw.length > REPLAY_FILE_MAX_BYTES) return {};
+    if (raw.length > REPLAY_FILE_MAX_BYTES) return empty;
     const parsed: unknown = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return {};
+      return empty;
     }
     const cache: ReplayCache = Object.create(null);
     for (const [id, value] of Object.entries(parsed)) {
@@ -123,6 +124,7 @@ export function loadReplayCache(baseDir: string, key: string): ReplayCache {
           ok: item.ok,
           output: item.output,
           ...(typeof item.label === "string" ? { label: item.label } : {}),
+          ...(item.truncated === true ? { truncated: true } : {}),
           ...(item.structured !== undefined
             ? { structured: item.structured }
             : {}),
@@ -132,8 +134,25 @@ export function loadReplayCache(baseDir: string, key: string): ReplayCache {
     }
     return cache;
   } catch {
-    return {};
+    return Object.create(null);
   }
+}
+
+/**
+ * Merge an entry into an in-memory replay cache: replace any existing variant
+ * with the same prompt hash, then keep only the newest variants per id. Shared
+ * by saveReplayEntry and the live in-run cache so both stay consistent.
+ */
+export function mergeReplayEntry(
+  cache: ReplayCache,
+  id: string,
+  entry: ReplayEntry,
+): void {
+  const variants = (cache[id] ?? []).filter(
+    (candidate) => candidate.promptHash !== entry.promptHash,
+  );
+  variants.push(entry);
+  cache[id] = variants.slice(-REPLAY_VARIANTS_PER_ID);
 }
 
 /** Persist one completed entry; best-effort, bounded, never throws. */
@@ -154,11 +173,7 @@ export function saveReplayEntry(
             .toString("utf8")
         : entry.output;
     const stored: ReplayEntry = { ...entry, output: boundedOutput };
-    const variants = (cache[id] ?? []).filter(
-      (candidate) => candidate.promptHash !== stored.promptHash,
-    );
-    variants.push(stored);
-    cache[id] = variants.slice(-REPLAY_VARIANTS_PER_ID);
+    mergeReplayEntry(cache, id, stored);
     writeFileAtomic(
       replayPath(baseDir, key),
       JSON.stringify(cache, null, 2),

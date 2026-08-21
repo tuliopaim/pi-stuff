@@ -81,6 +81,7 @@ import {
   budgetExceededMessage,
   isTransientProviderError,
   loadReplayCache,
+  mergeReplayEntry,
   mergeUsage,
   promptHash,
   replayKey,
@@ -136,6 +137,10 @@ export function validateAgentSelection(opts: AgentCallOptions): string | undefin
   if (opts.id !== undefined) {
     if (typeof opts.id !== "string" || !opts.id.trim())
       return '`id` must be a non-empty string when provided';
+    // Restrict the keyspace: ids index both JSON files and in-memory caches,
+    // so keep them simple and free of Object prototype property names.
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(opts.id))
+      return '`id` may only contain letters, digits, ".", "_", ":", "-" and must start with a letter or digit';
   }
 }
 
@@ -569,6 +574,7 @@ export default function workflows(pi: ExtensionAPI) {
             return {
               ok: true,
               output: hit.output,
+              ...(hit.truncated ? { truncated: true } : {}),
               ...(hit.structured !== undefined
                 ? { structured: hit.structured }
                 : {}),
@@ -612,9 +618,12 @@ export default function workflows(pi: ExtensionAPI) {
               if (!v.allowed) return fail(v.error);
             }
 
-            const resources = await getResources(opts.schema !== undefined);
-            const attempt = () =>
-              runAgent({
+            const attempt = async () => {
+              // Fresh resources per attempt: the previous child session's
+              // teardown disposes its extension runtime, so never assume the
+              // loader from a failed attempt is still healthy.
+              const resources = await getResources(opts.schema !== undefined);
+              return runAgent({
                 prompt,
                 schema: opts.schema,
                 model,
@@ -634,6 +643,7 @@ export default function workflows(pi: ExtensionAPI) {
                   emit();
                 },
               });
+            };
 
             let outcome = await attempt();
             // One automatic retry when the failure looks like a transient
@@ -672,11 +682,12 @@ export default function workflows(pi: ExtensionAPI) {
                   label,
                   ok: true,
                   output: outcome.output,
+                  ...(outcome.truncated ? { truncated: true } : {}),
                   ...(outcome.structured !== undefined
                     ? { structured: outcome.structured }
                     : {}),
                 };
-                replayCache[opts.id] = entry;
+                mergeReplayEntry(replayCache, opts.id, entry);
                 saveReplayEntry(workflowsDir, resumeKey, opts.id, entry);
               }
             } else {
@@ -692,6 +703,9 @@ export default function workflows(pi: ExtensionAPI) {
               if (over) {
                 budgetFailure = over;
                 blockingFailure ??= over;
+                // Fail fast: abort queued and active agents instead of
+                // letting them keep spending past the cap.
+                controller.abort(over);
               }
             }
             emit();

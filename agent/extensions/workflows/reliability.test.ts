@@ -8,6 +8,7 @@ import {
   budgetExceededMessage,
   isTransientProviderError,
   loadReplayCache,
+  mergeReplayEntry,
   mergeUsage,
   promptHash,
   replayKey,
@@ -20,6 +21,9 @@ import { emptyUsage } from "./model.ts";
 test("isTransientProviderError matches upstream/provider failures", () => {
   const transient = [
     '503: {"type":"server_error","message":"Upstream request failed: Endpoint is unavailable."}',
+    "HTTP 503 Service Unavailable",
+    "502 Bad Gateway",
+    "504 Gateway Timeout from upstream",
     "500: internal server error",
     "upstream request failed for unknown reason",
     "fetch failed",
@@ -96,11 +100,13 @@ test("replay cache round-trips entries through the filesystem", () => {
       label: "recon",
       ok: true,
       output: "the thing was done",
+      truncated: true,
       structured: { files: ["a.ts"] },
     });
     const cache = loadReplayCache(base, key);
     assert.equal(cache["step-1"][0].ok, true);
     assert.equal(cache["step-1"][0].output, "the thing was done");
+    assert.equal(cache["step-1"][0].truncated, true);
     assert.deepEqual(cache["step-1"][0].structured, { files: ["a.ts"] });
     assert.equal(replayPath(base, key), path.join(base, "replay", `${key}.json`));
   } finally {
@@ -216,4 +222,39 @@ test("saveReplayEntry keeps distinct prompt variants per id without evicting eac
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+test("loadReplayCache never returns a prototype-bearing object", () => {
+  const base = mkdtempSync(path.join(os.tmpdir(), "wf-replay-"));
+  try {
+    const missing = loadReplayCache(base, replayKey("nope", "x"));
+    assert.equal(Object.getPrototypeOf(missing), null);
+
+    mkdirReplayWith(
+      base,
+      `${replayKey("proto", "x")}.json`,
+      JSON.stringify({ constructor: { promptHash: "h", ok: true, output: "o" } }),
+    );
+    const poisoned = loadReplayCache(base, replayKey("proto", "x"));
+    // No prototype: even an id named like an Object property resolves only to
+    // its own stored data, never to inherited members.
+    assert.equal(Object.getPrototypeOf(poisoned), null);
+    const variants = poisoned["constructor"];
+    assert.ok(Array.isArray(variants) && variants[0]?.promptHash === "h");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("mergeReplayEntry keeps the in-memory cache shaped like loaded caches", () => {
+  const cache = Object.create(null);
+  mergeReplayEntry(cache, "step", { promptHash: "aaa", ok: true, output: "v1" });
+  mergeReplayEntry(cache, "step", { promptHash: "bbb", ok: true, output: "v2" });
+  mergeReplayEntry(cache, "step", { promptHash: "aaa", ok: true, output: "v1b" });
+  assert.ok(Array.isArray(cache.step));
+  assert.equal(cache.step.length, 2);
+  assert.deepEqual(
+    cache.step.map((v) => v.output),
+    ["v2", "v1b"],
+  );
 });
