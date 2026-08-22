@@ -24,7 +24,15 @@ Most delegated work does not need a workflow. Three tools run focused jobs in is
 | `review` | Review a change from a fresh context and report correctness, security, or regression risks | Read-only |
 | `commit` | Inspect completed work, stage only the intended files, and create one or more commits | Git write access |
 
-Each tool has its own model, reasoning level, timeout, prompt, and output limit, while sharing the same subprocess lifecycle and activity UI. Child agents cannot recursively delegate.
+Each tool has its own timeout, prompt, and output limit, while sharing the same subprocess lifecycle and activity UI. Child agents cannot recursively delegate.
+
+Models are not hardwired per tool. They resolve through one precedence ladder:
+
+1. **Explicit pick** — if you name a model or lane in your prompt ("use ox-alpha-free high"), the agent passes a `route` argument on every delegation call for that task. It overrides everything below.
+2. **Preset roles** — otherwise each tool uses its role mapping from the active preset (`scout → recon`, `review → deep`, …).
+3. **Built-in fallbacks** — only when no preset is active at all.
+
+A `route` accepts either a lane id (`ox`) or an exact provider/model string (`opencode-go/ox-alpha-free`), so prose maps onto lanes without string gymnastics. The resolved model is visible on every call and result card.
 
 Model choices live in `agent/settings.json`. Switch the active set for the current session with:
 
@@ -37,14 +45,52 @@ Model choices live in `agent/settings.json`. Switch the active set for the curre
 
 ### Agent routes
 
-Each preset also defines an `agent.routes` list — the exact model/thinking combinations
-that `agent`, `subagent_spawn`, and workflow `agent()` are allowed to use. When a
-preset has routes configured, any request outside the list is rejected before
-spawning a child. Presets without routes retain the unrestricted default.
+Each preset defines an `agent.routes` list — named lanes that are the single
+vocabulary for child model selection. A route is an `id`, a `model`, a
+`thinking` level, and short `guidance` describing when to use it:
 
+```json
+{ "id": "ox", "model": "opencode-go/ox-alpha-free", "thinking": "high", "guidance": "long multi-step implementations, cross-module refactors, hard debugging" }
+```
+
+The same list drives three things:
+
+- **Roles** — `scout`, `review`, and `commit` pin their default lane by route id.
+- **Dynamic tools** — `agent`, `subagent_spawn`, and workflow `agent()` calls must use a configured model/thinking pair (unless the preset sets `offRoute: "allow"`).
+- **Explicit picks** — a `route` argument on any delegation call references a lane by id or provider/model string.
+
+When a preset has routes configured, anything outside the list is rejected
+before spawning a child. Presets without routes retain the unrestricted default.
 See the available routes for the current session by calling any dynamic subagent
 tool with a disallowed model/thinking pair — the error message lists the permitted
 routes.
+
+### Prompting for specific models
+
+Say it like a human; the agent translates your words into a `route` argument:
+
+```text
+/delegate review the last commit, see if we changed anything we didn't have to
+```
+→ scout lands on `recon`, review on `deep`. Nothing to say.
+
+```text
+/delegate review the last commit ... use ox-alpha-free high for everything
+```
+→ every child this task resolves through the `ox` lane.
+
+```text
+/delegate check two things in parallel: (1) did the migration drop any MapEnum
+calls beyond the known list, (2) does anything still reference Pomelo?
+Put (1) on recon but do (2) on ox — it needs broad context.
+```
+→ one scout per question, each with its own lane, visible per call.
+
+For larger jobs see [Multi-agent workflows](#multi-agent-workflows): `/workflow`
+for phased or parallel orchestration, `subagent_spawn` for long-running work in
+separate working trees. Lanes are picked per child either from the routes'
+guidance text ("planner on deep, implementation owner on ox") or from an
+explicit pick in your prompt.
 
 ### Mac mini default
 

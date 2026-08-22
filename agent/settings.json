@@ -1,8 +1,8 @@
 {
-  "lastChangelogVersion": "0.84.2",
-  "defaultProvider": "opencode-go",
-  "defaultModel": "ox-alpha-free",
-  "defaultThinkingLevel": "high",
+  "lastChangelogVersion": "0.84.3",
+  "defaultProvider": "openai-codex",
+  "defaultModel": "gpt-5.6-sol",
+  "defaultThinkingLevel": "medium",
   "enabledModels": [
     "openai-codex/gpt-5.6-luna:high",
     "openai-codex/gpt-5.6-sol:medium",
@@ -106,19 +106,19 @@
           },
           {
             "id": "implement",
-            "model": "opencode-go/kimi-k2.7-code",
+            "model": "opencode-go/ox-alpha-free",
             "thinking": "high",
-            "guidance": "routine or clearly scoped implementation"
+            "guidance": "implementation work"
           },
           {
             "id": "review",
-            "model": "opencode-go/glm-5.2",
-            "thinking": "high",
+            "model": "opencode-go/ox-alpha-free",
+            "thinking": "max",
             "guidance": "code review"
           },
           {
             "id": "deep",
-            "model": "opencode-go/kimi-k3",
+            "model": "opencode-go/ox-alpha-free",
             "thinking": "max",
             "guidance": "planning or consequential final review"
           }

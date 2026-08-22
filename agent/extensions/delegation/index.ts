@@ -16,8 +16,10 @@ import {
   getDelegationConfig,
   getSubagentPresetNames,
   isSubagentEnabled,
+  optionalString,
   registerDelegatedTool,
   registerDynamicRouteGuidance,
+  resolveRouteRef,
   setSubagentPreset,
   validateRoute,
   type DelegationDetails,
@@ -26,6 +28,10 @@ import {
 
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
+// The model/thinking fields on the policies below are fallbacks used only when
+// no subagent preset is active. Whenever a preset is active, getDelegationConfig
+// resolves every child through that preset's roles, and an explicit `route`
+// argument on a call overrides both. See README "Subagents".
 const SCOUT: DelegationPolicy = {
   key: "scout",
   name: "Scout",
@@ -354,25 +360,39 @@ export default function (
       "Use two to four only for genuinely independent workstreams in separate working trees. For parallel read-only fan-out in one tree, use workflow instead.",
       "Treat four as a hard ceiling, not a target. Wait for results only when the parent needs them for its next decision.",
       "Choose each child's model and thinking level from the active subagent preset routes.",
+      "When the user names a specific model or lane, pass it in `route` (route id or provider/model); an explicit user pick overrides preset roles.",
     ],
     parameters: Type.Object({
       task: Type.String({ description: "Self-contained task" }),
       name: Type.String({ description: "Short display name" }),
-      model: Type.String({ description: "Exact provider/model id" }),
-      thinking: Type.String({ description: "off|minimal|low|medium|high|xhigh|max" }),
+      model: Type.Optional(Type.String({ description: "Exact provider/model id (required unless `route` is given)" })),
+      thinking: Type.Optional(Type.String({ description: "off|minimal|low|medium|high|xhigh|max (required unless `route` is given)" })),
+      route: Type.Optional(Type.String({ description: "Route id or provider/model from the active preset; overrides `model`/`thinking`" })),
       working_dir: Type.Optional(Type.String({ description: "Working directory; defaults to the parent cwd" })),
     }),
     async execute(_id, params, signal, _update, ctx) {
-      if (!THINKING_LEVELS.has(params.thinking)) throw new Error(`Invalid thinking level: ${params.thinking}`);
-      {
+      let model: string;
+      let thinking: string;
+      const routeRef = optionalString(params.route);
+      if (routeRef) {
+        const route = resolveRouteRef(routeRef);
+        model = route.model;
+        thinking = route.thinking;
+      } else {
+        if (!optionalString(params.model) || !optionalString(params.thinking)) {
+          throw new Error("Provide either `route` or both `model` and `thinking`.");
+        }
+        if (!THINKING_LEVELS.has(params.thinking)) throw new Error(`Invalid thinking level: ${params.thinking}`);
         const v = validateRoute(params.model, params.thinking);
         if (!v.allowed) throw new Error(v.error);
+        model = params.model;
+        thinking = params.thinking;
       }
       const cwd = path.resolve(ctx.cwd, params.working_dir ?? ".");
       if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) throw new Error(`working_dir is not a directory: ${cwd}`);
       const snapshot = await getManager().spawn({
         origin: "generic", title: params.name.trim() || "subagent", task: params.task, cwd,
-        model: params.model, thinking: params.thinking, mutating: true,
+        model, thinking, mutating: true,
         config: { name: "Agent", prompt: AGENT.prompt, timeoutMs: AGENT.timeoutMs, inheritResources: true },
         signal,
       });
@@ -382,6 +402,7 @@ export default function (
       const name = typeof args.name === "string" && args.name.trim() ? args.name.trim() : "subagent";
       let text = `${theme.fg("toolTitle", theme.bold("spawn subagent "))}${theme.fg("accent", name)}`;
       if (args.model) text += `\n${theme.fg("dim", `${args.model}:${args.thinking ?? "?"}`)}`;
+      else if (typeof args.route === "string") text += `\n${theme.fg("dim", `route: ${args.route}`)}`;
       if (args.task) text += `\n${theme.fg("muted", args.task)}`;
       return new Text(text, 0, 0);
     },

@@ -167,6 +167,7 @@ export function modelSelectionGuidelines(): string[] {
   return [
     "When choosing a model and thinking level for a delegated child, pick from the active preset routes:",
     ...routes.map(renderRoute),
+    "If the user names a specific model or lane for delegated children, pass that route explicitly on every delegation call for that task; an explicit user pick overrides each tool's preset role.",
   ];
 }
 
@@ -199,9 +200,55 @@ export function formatRouteGuidance(): string {
   return routes.map(renderRoute).join("\n");
 }
 
+/**
+ * Resolves one route reference to a configured route. A reference matches a
+ * route id first, then an exact provider/model string, so prose like "use
+ * opencode-go/ox-alpha-free" lands on the same lane as its id.
+ */
+export function resolveRouteRef(ref: string): AgentRoute {
+  const routes = getAgentRoutes();
+  const route = routes.find((r) => r.id === ref) ?? routes.find((r) => r.model === ref);
+  if (!route) {
+    throw new Error(
+      `Unknown route "${ref}".\nAvailable routes:\n${formatRouteGuidance() || "(no subagent preset routes are configured)"}`
+    );
+  }
+  return route;
+}
+
+/** Extracts an optional non-empty string parameter as trimmed text. */
+export function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+/**
+ * Per-call model overrides for a delegated tool call. An explicit `route`
+ * wins over everything else (the user's pick); dynamic-model tools otherwise
+ * require their raw model/thinking pair.
+ */
+export function callOverrides(policy: DelegationPolicy, params: any): Pick<DelegationConfig, "model" | "thinking"> {
+  const routeRef = optionalString(params?.route);
+  if (routeRef) {
+    const route = resolveRouteRef(routeRef);
+    return { model: route.model, thinking: route.thinking };
+  }
+  if (!policy.dynamicModel) return {};
+  if (!optionalString(params?.model) || !optionalString(params?.thinking)) {
+    throw new Error("Provide either `route` or both `model` and `thinking`.");
+  }
+  if (!THINKING_LEVELS.has(params.thinking)) {
+    throw new Error(`Invalid thinking level: ${params.thinking}`);
+  }
+  const v = validateRoute(params.model, params.thinking);
+  if (!v.allowed) throw new Error(v.error);
+  return { model: params.model, thinking: params.thinking };
+}
+
 export interface DelegationConfig {
   readonly name: string;
+  /** Fallback model, used only when no subagent preset is active. An active preset resolves models through its routes. */
   readonly model: string;
+  /** Fallback thinking level, used only when no subagent preset is active. */
   readonly thinking: string;
   readonly timeoutMs: number;
   readonly tools?: string;
@@ -275,6 +322,9 @@ export function createDelegationDetails(config: DelegationConfig, task: string):
 
 export function registerDelegatedTool(pi: ExtensionAPI, policy: DelegationPolicy, getManager: () => SubagentManager) {
   const resolveConfig = () => policy.dynamicModel ? policy : getDelegationConfig(policy.key, policy);
+  const ROUTE_PARAM = Type.Optional(Type.String({
+    description: "Route id or provider/model from the active preset's routes; overrides this tool's preset role for this call",
+  }));
   const run = async (
     task: string,
     cwd: string,
@@ -325,26 +375,24 @@ export function registerDelegatedTool(pi: ExtensionAPI, policy: DelegationPolicy
     label: policy.name,
     description: `${policy.description} Hard timeout: ${policy.timeoutMs / 1000}s.`,
     promptSnippet: policy.snippet,
-    promptGuidelines: [...policy.guidelines],
+    promptGuidelines: [
+      ...policy.guidelines,
+      "When the user names a specific model or lane for this delegation, pass it in `route` (route id or provider/model); an explicit user pick overrides the preset role.",
+    ],
     parameters: policy.dynamicModel
       ? Type.Object({
           task: Type.String({ description: policy.parameter }),
-          model: Type.String({ description: "Exact provider/model id chosen for this task" }),
-          thinking: Type.String({ description: "Reasoning level: off, minimal, low, medium, high, xhigh, or max" }),
+          model: Type.Optional(Type.String({ description: "Exact provider/model id (required unless `route` is given)" })),
+          thinking: Type.Optional(Type.String({ description: "Reasoning level: off, minimal, low, medium, high, xhigh, or max (required unless `route` is given)" })),
+          route: ROUTE_PARAM,
         })
-      : Type.Object({ task: Type.String({ description: policy.parameter }) }),
+      : Type.Object({
+          task: Type.String({ description: policy.parameter }),
+          route: ROUTE_PARAM,
+        }),
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      if (policy.dynamicModel) {
-        if (!THINKING_LEVELS.has((params as any).thinking)) {
-          throw new Error(`Invalid thinking level: ${(params as any).thinking}`);
-        }
-        const v = validateRoute((params as any).model, (params as any).thinking);
-        if (!v.allowed) throw new Error(v.error);
-      }
-      const overrides = policy.dynamicModel
-        ? { model: (params as any).model, thinking: (params as any).thinking }
-        : undefined;
+      const overrides = callOverrides(policy, params);
       const details = await run(params.task, ctx.cwd, signal, (details) => {
         onUpdate?.({
           content: [{ type: "text", text: details.output || details.activities.at(-1) || "(running…)" }],
@@ -355,12 +403,21 @@ export function registerDelegatedTool(pi: ExtensionAPI, policy: DelegationPolicy
     },
 
     renderCall(args, theme, context) {
-      const cached = context.state.config as DelegationConfig | undefined;
+      let base = (context.state.config as DelegationConfig | undefined) ?? resolveConfig();
+      const routeRef = optionalString((args as any)?.route);
+      if (routeRef) {
+        try {
+          const route = resolveRouteRef(routeRef);
+          base = { ...base, model: route.model, thinking: route.thinking };
+        } catch {
+          // Keep the resolved default; renderCall must not throw on bad input.
+        }
+      }
       const config = policy.dynamicModel ? {
-        ...(cached ?? resolveConfig()),
+        ...base,
         ...(typeof (args as any).model === "string" ? { model: (args as any).model } : {}),
         ...(typeof (args as any).thinking === "string" ? { thinking: (args as any).thinking } : {}),
-      } : cached ?? resolveConfig();
+      } : base;
       context.state.config = config;
       return renderDelegationCall(config, args.task, context.expanded, theme);
     },
