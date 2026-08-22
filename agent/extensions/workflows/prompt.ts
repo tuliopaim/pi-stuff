@@ -12,7 +12,7 @@ export const WORKFLOW_PARAMETER_DESCRIPTIONS = {
     "JavaScript workflow script. May start with `export const meta = { name, description, phases, budget? }`, then use phase(), agent(), parallel(), args, and a final `return`. `budget` is optional `{ maxCost?, maxTokens? }`; the run fails fast when spend exceeds it.",
   args: "Optional JSON string exposed to the script as `args` (parsed when valid JSON, otherwise passed through as the raw string).",
   background:
-    "Run in the background: the tool returns a run id immediately and you receive a follow-up message when the workflow finishes. Defaults to false (blocking with live progress).",
+    "Run in the background: the tool returns a run id immediately and you receive a follow-up message when the workflow finishes. Defaults to true in interactive sessions so cancelling the parent turn does not stop child agents. Set false for blocking live progress. Non-interactive modes always block.",
 };
 
 /** Defines the workflow DSL, constraints, reliability guidance, and model-authored task examples. */
@@ -64,6 +64,7 @@ export function buildPromptGuidelines(routesText: string): string[] {
   return [
     "Use the fewest agents that materially reduce context, uncertainty, or elapsed time: zero for clear local work, one for a single self-contained workstream, and two to four only for independent fan-out or real phase dependencies.",
     "Use workflow when a task needs several subagents with phase dependencies or dynamic fan-out; keep focused one-off reconnaissance, review, implementation, and commit work in scout, review, agent, and commit.",
+    "In interactive sessions, let workflow use its background default for long-running fan-out. The completion follow-up starts the reconciliation turn automatically. Set `background: false` only when blocking live progress is worth making the run follow the parent turn's cancellation signal.",
     "Subagents share the working tree. Use at most one mutating agent in a workflow; parallel fan-out must be read-only. Prefer one implementation owner for connected changes.",
     "In workflow scripts, every agent() call must explicitly set `model` and `effort`; omission fails safely before a provider request.",
     modelGuidance,

@@ -38,6 +38,11 @@ import { formatActivityStatus } from "../shared/activity-status.ts";
 import { validateRoute as validateSubagentRoute } from "../delegation/runtime.ts";
 import { createWorkflowPersistence, persistWorkflowJson } from "./artifacts.ts";
 import { RunController } from "./controller.ts";
+import {
+  createWorkflowOwnership,
+  readWorkflowOwnership,
+  type WorkflowOwnershipHandle,
+} from "./ownership.ts";
 import { sessionWorkflowRunIds, showWorkflowDashboard } from "./dashboard.ts";
 import {
   extractMeta,
@@ -271,6 +276,10 @@ function runDetailText(
     const parsed = JSON.parse(
       fs.readFileSync(path.join(runDir, "workflow.json"), "utf8"),
     ) as WorkflowDetails;
+    if (!run.active && parsed.status === "running") {
+      parsed.status = "aborted";
+      parsed.error ??= "Recovered stale run that was not active";
+    }
     return buildWorkflowResultMessage(parsed, runDir);
   } catch {
     return `Run ${run.runId} — ${run.status}`;
@@ -278,7 +287,7 @@ function runDetailText(
 }
 
 export default function workflows(pi: ExtensionAPI) {
-  /** Live background runs, for /workflows and shutdown cleanup. */
+  /** Live runs owned by this process. Controllers live here. */
   const activeRuns = new Map<
     string,
     {
@@ -292,6 +301,70 @@ export default function workflows(pi: ExtensionAPI) {
       [...activeRuns].map(([runId, run]) => [runId, run.details] as const),
     );
 
+  /**
+   * Observed runs owned by another Pi process. Display-only: no controller,
+   * no abort, no settlement follow-up. Cleared on shutdown.
+   */
+  const observedRuns = new Map<string, WorkflowDetails>();
+  let observerTimer: ReturnType<typeof setInterval> | undefined;
+  let observedSessionId = "";
+  let observedReferencedRunIds: ReadonlySet<string> = new Set();
+
+  const allRunsDetails = (): Map<string, WorkflowDetails> => {
+    const merged = new Map(activeDetails());
+    for (const [runId, details] of observedRuns) {
+      if (!merged.has(runId)) merged.set(runId, details);
+    }
+    return merged;
+  };
+
+  const stopObserver = () => {
+    if (observerTimer) {
+      clearInterval(observerTimer);
+      observerTimer = undefined;
+    }
+    observedRuns.clear();
+    observedSessionId = "";
+    observedReferencedRunIds = new Set();
+  };
+
+  const scanObservedRuns = (
+    sessionId: string,
+    referencedRunIds: ReadonlySet<string>,
+  ) => {
+    observedSessionId = sessionId;
+    const base = path.join(getAgentDir(), "workflows");
+    let names: string[] = [];
+    try {
+      names = fs.readdirSync(base).filter((name) => name.startsWith("wf_"));
+    } catch {
+      // No runs yet.
+    }
+    for (const runId of names) {
+      if (observedRuns.has(runId) || activeRuns.has(runId)) continue;
+      const runDir = path.join(base, runId);
+      let details: WorkflowDetails;
+      try {
+        details = JSON.parse(
+          fs.readFileSync(path.join(runDir, "workflow.json"), "utf8"),
+        ) as WorkflowDetails;
+      } catch {
+        continue;
+      }
+      if (details.status !== "running") continue;
+      if (details.sessionId !== sessionId && !referencedRunIds.has(runId)) {
+        continue;
+      }
+      const ownership = readWorkflowOwnership({
+        runDir,
+        runId,
+        sessionId: details.sessionId ?? sessionId,
+      });
+      if (!ownership.active) continue;
+      observedRuns.set(runId, details);
+    }
+  };
+
   /** Finished counts remain visible until the dashboard acknowledges them. */
   let lastUi: ExtensionContext["ui"] | undefined;
   let completedRuns = 0;
@@ -300,7 +373,7 @@ export default function workflows(pi: ExtensionAPI) {
     const ui = lastUi;
     if (!ui) return;
     try {
-      const running = activeRuns.size;
+      const running = activeRuns.size + observedRuns.size;
       if (running === 0 && completedRuns === 0 && failedRuns === 0) {
         ui.setStatus("workflows", undefined);
         return;
@@ -323,8 +396,60 @@ export default function workflows(pi: ExtensionAPI) {
     else failedRuns += 1;
   };
 
+  const refreshObservedRuns = () => {
+    for (const [runId, previous] of observedRuns) {
+      const runDir = path.join(getAgentDir(), "workflows", runId);
+      let latest: WorkflowDetails;
+      try {
+        latest = JSON.parse(
+          fs.readFileSync(path.join(runDir, "workflow.json"), "utf8"),
+        ) as WorkflowDetails;
+      } catch {
+        observedRuns.delete(runId);
+        updateIndicator();
+        continue;
+      }
+      const ownership = readWorkflowOwnership({
+        runDir,
+        runId,
+        sessionId: previous.sessionId ?? observedSessionId,
+      });
+      if (latest.status !== "running") {
+        observedRuns.delete(runId);
+        recordSettledRun(latest.status);
+        updateIndicator();
+      } else if (!ownership.active) {
+        // Observation is display-only. Never rewrite another process's run
+        // artifact: a paused owner may resume heartbeating, and persisted
+        // `running` already falls back to `aborted` outside the observed map.
+        observedRuns.delete(runId);
+        updateIndicator();
+      } else {
+        observedRuns.set(runId, latest);
+        updateIndicator();
+      }
+    }
+    if (observedSessionId) {
+      scanObservedRuns(observedSessionId, observedReferencedRunIds);
+      updateIndicator();
+    }
+  };
+
   pi.on("session_start", (_event, ctx) => {
     if (ctx.hasUI) lastUi = ctx.ui;
+    const sessionId = ctx.sessionManager.getSessionId();
+    const referencedRunIds = sessionWorkflowRunIds(ctx);
+    observedReferencedRunIds = referencedRunIds;
+    scanObservedRuns(sessionId, referencedRunIds);
+    if (!observerTimer) {
+      // The env var is a test seam; production uses the 1s default.
+      const intervalMs = Math.max(
+        50,
+        Number(process.env.PI_WORKFLOW_OBSERVER_INTERVAL_MS) || 1_000,
+      );
+      observerTimer = setInterval(refreshObservedRuns, intervalMs);
+      observerTimer.unref?.();
+    }
     updateIndicator();
   });
 
@@ -348,6 +473,7 @@ export default function workflows(pi: ExtensionAPI) {
       await Promise.race([Promise.allSettled(completions), timeout]);
       if (timer) clearTimeout(timer);
     }
+    stopObserver();
     lastUi?.setStatus("workflows", undefined);
     lastUi = undefined;
   });
@@ -359,7 +485,7 @@ export default function workflows(pi: ExtensionAPI) {
       const arg = rawArgs.trim();
       if (ctx.mode === "tui") {
         lastUi = ctx.ui;
-        await showWorkflowDashboard(ctx, activeDetails, arg || undefined);
+        await showWorkflowDashboard(ctx, allRunsDetails, arg || undefined);
         // Opening the dashboard acknowledges finished runs.
         completedRuns = 0;
         failedRuns = 0;
@@ -368,7 +494,7 @@ export default function workflows(pi: ExtensionAPI) {
       }
       // Non-TUI fallback: plain text listing.
       const runs = listRuns(
-        activeDetails(),
+        allRunsDetails(),
         ctx.sessionManager.getSessionId(),
         sessionWorkflowRunIds(ctx),
       );
@@ -380,7 +506,7 @@ export default function workflows(pi: ExtensionAPI) {
         const run = runs.find((r) => r.runId === arg || r.runId.endsWith(arg));
         ctx.ui.notify(
           run
-            ? runDetailText(run, activeDetails())
+            ? runDetailText(run, allRunsDetails())
             : `No workflow run matching "${arg}".`,
           run ? "info" : "warning",
         );
@@ -397,7 +523,7 @@ export default function workflows(pi: ExtensionAPI) {
       const choice = await ctx.ui.select("Workflow runs", labels);
       if (!choice) return;
       const run = runs[labels.indexOf(choice)];
-      if (run) ctx.ui.notify(runDetailText(run, activeDetails()), "info");
+      if (run) ctx.ui.notify(runDetailText(run, allRunsDetails()), "info");
     },
   });
 
@@ -439,7 +565,12 @@ export default function workflows(pi: ExtensionAPI) {
       const resumeKey = replayKey(meta.name, prepared.source);
       const replayCache: ReplayCache = loadReplayCache(workflowsDir, resumeKey);
       const budget = sanitizeBudget(meta.budget);
-      const background = (params.background ?? false) && ctx.hasUI;
+      // Interactive workflows often run for minutes. Default them to the
+      // background so cancelling the parent turn does not tear down every
+      // child agent. Callers can still request blocking live progress with
+      // `background: false`. Non-interactive modes remain blocking because
+      // there is no live session to receive the completion follow-up.
+      const background = (params.background ?? ctx.mode === "tui") && ctx.hasUI;
 
       const details: WorkflowDetails = {
         runId,
@@ -458,6 +589,14 @@ export default function workflows(pi: ExtensionAPI) {
         writeRunFile(runDir, "args.json", params.args);
       persistWorkflowJson(runDir, details);
       const persistence = createWorkflowPersistence(runDir, details);
+
+      // Claim ownership before the run is visible to other processes. The
+      // lease is removed only after final artifact persistence.
+      const ownership: WorkflowOwnershipHandle = createWorkflowOwnership({
+        runDir,
+        runId,
+        sessionId: ctx.sessionManager.getSessionId(),
+      });
 
       // Background runs survive Esc on the parent turn, but all runs are
       // aborted and settled during session shutdown.
@@ -724,55 +863,59 @@ export default function workflows(pi: ExtensionAPI) {
       };
 
       const runScript = async () => {
-        let status: WorkflowDetails["status"] = "completed";
         try {
-          details.result = await runWorkflowSandbox({
-            source: prepared.source,
-            args,
-            cwd: ctx.cwd,
-            signal: controller.signal,
-            onAgent: agentFn,
-            onPhase: phaseFn,
-          });
-          if (budgetFailure) {
-            details.error = budgetFailure;
-            status = "failed";
-          } else if (blockingFailure) {
-            details.error = `Required agent failed: ${blockingFailure}`;
-            status = "failed";
+          let status: WorkflowDetails["status"] = "completed";
+          try {
+            details.result = await runWorkflowSandbox({
+              source: prepared.source,
+              args,
+              cwd: ctx.cwd,
+              signal: controller.signal,
+              onAgent: agentFn,
+              onPhase: phaseFn,
+            });
+            if (budgetFailure) {
+              details.error = budgetFailure;
+              status = "failed";
+            } else if (blockingFailure) {
+              details.error = `Required agent failed: ${blockingFailure}`;
+              status = "failed";
+            }
+          } catch (error) {
+            details.error = errorText(error);
+            status = controller.signal.aborted ? "aborted" : "failed";
+            controller.abort("Workflow script failed");
           }
-        } catch (error) {
-          details.error = errorText(error);
-          status = controller.signal.aborted ? "aborted" : "failed";
-          controller.abort("Workflow script failed");
-        }
 
-        const settled = await controller.settle({
-          abort: status !== "completed",
-        });
-        if (!settled) {
-          status = "failed";
-          details.error = details.error
-            ? `${details.error}; agent shutdown deadline exceeded`
-            : "Agent shutdown deadline exceeded";
-        }
-        for (const record of details.agents) {
-          if (record.state !== "running") continue;
-          record.state = "error";
-          record.error =
-            record.error ?? "Agent did not settle before run cleanup";
-          record.finishedAt = Date.now();
-        }
-        details.status = status;
-        details.finishedAt = Date.now();
-        try {
-          persistence.flush();
-        } catch (error) {
-          details.status = "failed";
-          details.error = `Artifact persistence failed: ${errorText(error)}`;
-          throw new Error(details.error);
+          const settled = await controller.settle({
+            abort: status !== "completed",
+          });
+          if (!settled) {
+            status = "failed";
+            details.error = details.error
+              ? `${details.error}; agent shutdown deadline exceeded`
+              : "Agent shutdown deadline exceeded";
+          }
+          for (const record of details.agents) {
+            if (record.state !== "running") continue;
+            record.state = "error";
+            record.error =
+              record.error ?? "Agent did not settle before run cleanup";
+            record.finishedAt = Date.now();
+          }
+          details.status = status;
+          details.finishedAt = Date.now();
+          try {
+            persistence.flush();
+          } catch (error) {
+            details.status = "failed";
+            details.error = `Artifact persistence failed: ${errorText(error)}`;
+            throw new Error(details.error);
+          } finally {
+            progress.flush();
+          }
         } finally {
-          progress.flush();
+          ownership.stop();
         }
       };
 
