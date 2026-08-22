@@ -1,17 +1,18 @@
 {
   "lastChangelogVersion": "0.84.2",
-  "defaultProvider": "openai-codex",
-  "defaultModel": "gpt-5.6-luna",
+  "defaultProvider": "opencode-go",
+  "defaultModel": "ox-alpha-free",
   "defaultThinkingLevel": "high",
   "enabledModels": [
     "openai-codex/gpt-5.6-luna:high",
     "openai-codex/gpt-5.6-sol:medium",
     "openai-codex/gpt-5.6-terra:high",
     "opencode-go/deepseek-v4-flash:high",
-    "opencode-go/kimi-k2.7-code:high"
+    "opencode-go/kimi-k2.7-code:high",
+    "opencode-go/ox-alpha-free:high"
   ],
   "editorPaddingX": 2,
-  "hideThinkingBlock": false,
+  "hideThinkingBlock": true,
   "packages": [
     "git:github.com/code-yeongyu/pi-apply-patch",
     "npm:@plannotator/pi-extension"
