@@ -11,6 +11,7 @@ import { validateAgentSelection } from "./index.ts";
 import { WORKFLOW_PROMPT_GUIDELINES, WORKFLOW_TOOL_DESCRIPTION } from "./prompt.ts";
 import {
   createFirstResponseWatchdog,
+  FirstResponseTimeoutError,
   guardWorkflowChildTools,
   recordToolExecutionTiming,
   transcriptFromMessages,
@@ -201,7 +202,16 @@ test("first-response watchdog aborts a silent provider request", async () => {
 
   await assert.rejects(
     watchdog.waitFor(new Promise<never>(() => {})),
-    /no assistant response event for fixture-model within 10 ms.*stalled/i,
+    (error) => {
+      assert.ok(error instanceof FirstResponseTimeoutError);
+      assert.equal(error.kind, "first_response_timeout");
+      assert.equal(error.retryable, true);
+      assert.match(
+        error.message,
+        /no assistant response event for fixture-model within 10 ms.*stalled/i,
+      );
+      return true;
+    },
   );
   assert.equal(aborted, true);
 });

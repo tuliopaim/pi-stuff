@@ -37,6 +37,22 @@ export function isTransientProviderError(error: string | undefined): boolean {
   return TRANSIENT_ERROR_PATTERNS.some((pattern) => pattern.test(error));
 }
 
+interface AgentFailure {
+  ok: boolean;
+  aborted: boolean;
+  retryable?: boolean;
+  error?: string;
+}
+
+/** Retry explicit retryable failures and recognized transient provider errors. */
+export function shouldRetryAgentFailure(failure: AgentFailure): boolean {
+  return (
+    !failure.ok &&
+    !failure.aborted &&
+    (failure.retryable === true || isTransientProviderError(failure.error))
+  );
+}
+
 /** Sum usage across attempts so telemetry reflects every provider request. */
 export function mergeUsage(a: AgentUsage, b: AgentUsage): AgentUsage {
   const contextTokens =

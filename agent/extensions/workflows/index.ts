@@ -84,7 +84,6 @@ import {
 import { runWorkflowSandbox } from "./sandbox.ts";
 import {
   budgetExceededMessage,
-  isTransientProviderError,
   loadReplayCache,
   mergeReplayEntry,
   mergeUsage,
@@ -92,6 +91,7 @@ import {
   replayKey,
   saveReplayEntry,
   sanitizeBudget,
+  shouldRetryAgentFailure,
   type ReplayCache,
 } from "./reliability.ts";
 import { safeStringify, writeFileAtomic } from "./serialization.ts";
@@ -785,15 +785,13 @@ export default function workflows(pi: ExtensionAPI) {
             };
 
             let outcome = await attempt();
-            // One automatic retry when the failure looks like a transient
-            // upstream/provider error (5xx, dropped connections, rate limits).
+            // Retry explicit retryable failures (such as a silent provider)
+            // and recognized transient upstream failures exactly once.
             // Aborts and genuine task failures are never retried.
-            if (
-              !outcome.ok &&
-              !outcome.aborted &&
-              isTransientProviderError(outcome.error)
-            ) {
+            if (shouldRetryAgentFailure(outcome)) {
               record.retries = 1;
+              record.error = outcome.error;
+              record.errorKind = outcome.errorKind;
               emit(false);
               const second = await attempt();
               outcome = {
@@ -815,6 +813,7 @@ export default function workflows(pi: ExtensionAPI) {
             record.state = outcome.ok ? "done" : "error";
             if (outcome.ok) {
               delete record.error;
+              delete record.errorKind;
               if (typeof opts.id === "string") {
                 const entry = {
                   promptHash: promptHash(prompt),
@@ -831,6 +830,7 @@ export default function workflows(pi: ExtensionAPI) {
               }
             } else {
               record.error = outcome.error ?? "Agent failed";
+              record.errorKind = outcome.errorKind;
               if (opts.optional !== true)
                 blockingFailure ??= `agent "${label}": ${record.error}`;
             }

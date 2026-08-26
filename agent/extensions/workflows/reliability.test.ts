@@ -7,6 +7,7 @@ import { test } from "node:test";
 import {
   budgetExceededMessage,
   isTransientProviderError,
+  shouldRetryAgentFailure,
   loadReplayCache,
   mergeReplayEntry,
   mergeUsage,
@@ -37,6 +38,27 @@ test("isTransientProviderError matches upstream/provider failures", () => {
   for (const error of transient) {
     assert.equal(isTransientProviderError(error), true, error);
   }
+});
+
+test("shouldRetryAgentFailure honors structured retryable failures", () => {
+  assert.equal(
+    shouldRetryAgentFailure({
+      ok: false,
+      aborted: false,
+      retryable: true,
+      error: "first response timeout",
+    }),
+    true,
+  );
+  assert.equal(
+    shouldRetryAgentFailure({
+      ok: false,
+      aborted: true,
+      retryable: true,
+      error: "first response timeout",
+    }),
+    false,
+  );
 });
 
 test("isTransientProviderError rejects aborts, schema misses, and task errors", () => {

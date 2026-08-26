@@ -31,7 +31,12 @@ import {
   shutdownAndDisposeChildSession,
 } from "../shared/child-session.ts";
 import { createToolCallTimeoutGuard } from "../shared/tool-call-timeout.ts";
-import { emptyUsage, type AgentUsage, type TranscriptEntry } from "./model.ts";
+import {
+  emptyUsage,
+  type AgentErrorKind,
+  type AgentUsage,
+  type TranscriptEntry,
+} from "./model.ts";
 import {
   buildWorkflowAgentPrompt,
   STRUCTURED_OUTPUT_SYSTEM_INSTRUCTION,
@@ -68,6 +73,8 @@ export interface AgentOutcome {
   /** Captured structured_output payload when a schema was supplied. */
   structured?: unknown;
   error?: string;
+  errorKind?: AgentErrorKind;
+  retryable?: boolean;
   aborted: boolean;
   usage: AgentUsage;
   model?: string;
@@ -381,6 +388,20 @@ function formatTimeout(timeoutMs: number) {
     : `${timeoutMs} ms`;
 }
 
+/** A provider request opened but emitted no assistant event before the deadline. */
+export class FirstResponseTimeoutError extends Error {
+  readonly kind = "first_response_timeout" as const;
+  readonly retryable = true as const;
+
+  constructor(timeoutMs: number, model?: string) {
+    const modelText = model ? ` for ${model}` : "";
+    super(
+      `Agent received no assistant response event${modelText} within ${formatTimeout(timeoutMs)}; the provider request may be stalled. Retry the workflow.`,
+    );
+    this.name = "FirstResponseTimeoutError";
+  }
+}
+
 /** Abort a provider call that opens but never emits its first assistant event. */
 export function createFirstResponseWatchdog(
   onTimeout: () => Promise<unknown>,
@@ -391,12 +412,7 @@ export function createFirstResponseWatchdog(
   const timeout = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
       timer = undefined;
-      const model = options.model ? ` for ${options.model}` : "";
-      reject(
-        new Error(
-          `Agent received no assistant response event${model} within ${formatTimeout(timeoutMs)}; the provider request may be stalled. Retry the workflow.`,
-        ),
-      );
+      reject(new FirstResponseTimeoutError(timeoutMs, options.model));
       void onTimeout().catch(() => {});
     }, timeoutMs);
     timer.unref?.();
@@ -483,6 +499,8 @@ export async function runAgent(
   let contextWindow = childSession.model?.contextWindow;
   let stopReason: string | undefined;
   let errorMessage: string | undefined;
+  let errorKind: AgentOutcome["errorKind"];
+  let retryable = false;
   const toolTimings = new Map<string, ToolExecutionTiming>();
 
   const sync = () => {
@@ -595,7 +613,13 @@ export async function runAgent(
       }
     }
   } catch (error) {
-    errorMessage = errorMessage ?? errorText(error);
+    if (error instanceof FirstResponseTimeoutError) {
+      errorMessage = error.message;
+      errorKind = error.kind;
+      retryable = error.retryable;
+    } else {
+      errorMessage = errorMessage ?? errorText(error);
+    }
     stopReason = stopReason ?? "error";
   } finally {
     options.signal?.removeEventListener("abort", onAbort);
@@ -633,6 +657,8 @@ export async function runAgent(
       truncated,
       structured,
       error: errorMessage ?? "Agent failed",
+      ...(errorKind ? { errorKind } : {}),
+      ...(retryable ? { retryable: true } : {}),
       aborted: false,
       usage,
       model: modelId,

@@ -56,6 +56,66 @@ function wrapSelection(index: number, delta: number, length: number): number {
   return (index + delta + length) % length;
 }
 
+export function wrapDashboardError(
+  error: string,
+  width: number,
+  theme: Theme,
+  indent = "",
+): string[] {
+  const contentWidth = Math.max(8, width - visibleWidth(indent));
+  return wrapTextWithAnsi(theme.fg("error", error), contentWidth).map(
+    (line) => `${indent}${line}`,
+  );
+}
+
+export function agentStatusText(agent: AgentRecord): string {
+  const retry = agent.retries
+    ? agent.state === "running"
+      ? `retrying ${agent.retries}/1`
+      : `retried ${agent.retries}x`
+    : undefined;
+  const failure =
+    agent.state === "error" && agent.errorKind === "first_response_timeout"
+      ? "failed: no first response"
+      : undefined;
+  return [retry, failure, agent.model, agentContext(agent)]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+export function transcriptEntriesForDisplay(
+  agent: AgentRecord,
+): TranscriptEntry[] {
+  if (
+    !agent.error ||
+    agent.transcript.some(
+      (entry) => entry.isError === true && entry.text === agent.error,
+    )
+  ) {
+    return agent.transcript;
+  }
+  return [
+    ...agent.transcript,
+    { role: "toolResult", name: "agent", text: agent.error, isError: true },
+  ];
+}
+
+export function workflowErrorForDisplay(
+  details: WorkflowDetails,
+): string | undefined {
+  const error = details.error;
+  if (!error) return undefined;
+  if (
+    error.startsWith("Required agent failed:") &&
+    details.agents.some(
+      (agent) => agent.error !== undefined && error.endsWith(agent.error),
+    )
+  ) {
+    return undefined;
+  }
+  return error;
+}
+
 export interface RunEntry {
   runId: string;
   details: WorkflowDetails;
@@ -133,6 +193,12 @@ function normalizeDetails(
       error:
         typeof a.error === "string" && a.error !== "[undefined]"
           ? a.error
+          : undefined,
+      errorKind:
+        a.errorKind === "first_response_timeout" ? a.errorKind : undefined,
+      retries:
+        typeof a.retries === "number" && a.retries > 0
+          ? a.retries
           : undefined,
       preview: typeof a.preview === "string" ? a.preview : "",
       usage: {
@@ -845,9 +911,7 @@ export class WorkflowDashboard {
           selected && this.detailFocus === "agents"
             ? theme.fg("accent", "❯")
             : " ";
-        const stats = [agent.model, agentContext(agent)]
-          .filter(Boolean)
-          .join(" · ");
+        const stats = agentStatusText(agent);
         const label =
           selected && this.detailFocus === "agents"
             ? theme.fg("accent", agent.label.padEnd(Math.min(maxLabel, 40)))
@@ -860,11 +924,7 @@ export class WorkflowDashboard {
         agentRows.push(this.split(left, right, agentsInner));
         if (agent.error) {
           agentRows.push(
-            truncateToWidth(
-              `       ${theme.fg("error", agent.error)}`,
-              agentsInner,
-              "…",
-            ),
+            ...wrapDashboardError(agent.error, agentsInner, theme, "       "),
           );
         }
       }
@@ -872,13 +932,15 @@ export class WorkflowDashboard {
         agentRows.push(theme.fg("dim", " no agents in this phase yet"));
       }
     }
-    if (d.error) {
+    const workflowError = workflowErrorForDisplay(d);
+    if (workflowError) {
       agentRows.push("");
       agentRows.push(
-        truncateToWidth(
-          ` ${theme.fg("error", `workflow error: ${d.error}`)}`,
+        ...wrapDashboardError(
+          `workflow error: ${workflowError}`,
           agentsInner,
-          "…",
+          theme,
+          " ",
         ),
       );
     }
@@ -914,7 +976,8 @@ export class WorkflowDashboard {
   private transcriptRows(agent: AgentRecord, width: number): string[] {
     const theme = this.theme;
     const rows: string[] = [];
-    if (agent.transcript.length === 0) {
+    const entries = transcriptEntriesForDisplay(agent);
+    if (entries.length === 0) {
       return [
         theme.fg(
           "dim",
@@ -923,7 +986,7 @@ export class WorkflowDashboard {
       ];
     }
 
-    for (const entry of agent.transcript) {
+    for (const entry of entries) {
       const label = transcriptLabel(entry);
       const color = transcriptColor(entry);
       rows.push(
@@ -970,7 +1033,10 @@ export class WorkflowDashboard {
     lines.push(
       this.split(
         ` ${theme.fg("muted", `${details.name ?? details.runId} · ${agent.phase ?? "unphased"}`)}`,
-        theme.fg("dim", `${agent.transcript.length} entries `),
+        theme.fg(
+          "dim",
+          `${transcriptEntriesForDisplay(agent).length} entries `,
+        ),
         width,
       ),
     );
@@ -1006,6 +1072,7 @@ function transcriptLabel(entry: TranscriptEntry): string {
   if (entry.role === "assistant") return "ASSISTANT";
   if (entry.role === "thinking") return "THINKING";
   if (entry.role === "tool") return `TOOL ${entry.name ?? "unknown"}`;
+  if (entry.isError && entry.name === "agent") return "AGENT ERROR";
   return `RESULT ${entry.name ?? "unknown"}`;
 }
 

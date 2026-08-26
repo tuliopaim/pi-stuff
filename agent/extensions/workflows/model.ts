@@ -39,6 +39,7 @@ export function emptyUsage(): AgentUsage {
 }
 
 export type AgentState = "running" | "done" | "error";
+export type AgentErrorKind = "first_response_timeout";
 export type WorkflowStatus = "running" | "completed" | "failed" | "aborted";
 
 export type TranscriptRole =
@@ -79,6 +80,7 @@ export interface AgentRecord {
   startedAt: number;
   finishedAt?: number;
   error?: string;
+  errorKind?: AgentErrorKind;
   preview: string;
   usage: AgentUsage;
   /** Normalized, serializable subagent conversation shown by /workflows. */
