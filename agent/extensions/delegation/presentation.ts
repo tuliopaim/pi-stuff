@@ -1,7 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { formatCompactTokens, formatContextUtilization } from "../shared/context-utilization.ts";
-import type { SubagentSnapshot, SubagentUsage } from "./domain.ts";
+import { isPendingSubagentStatus, type SubagentSnapshot, type SubagentUsage } from "./domain.ts";
 
 type Theme = ExtensionContext["ui"]["theme"];
 
@@ -47,6 +47,11 @@ export function formatSubagentUsage(snapshot: SubagentSnapshot, now = Date.now()
 }
 
 function currentActivity(snapshot: SubagentSnapshot) {
+  if (snapshot.status === "waiting") return `? waiting for parent: ${sanitizeTerminalText(snapshot.question?.text ?? "question unavailable")}`;
+  if (snapshot.status === "stalled") {
+    const idleSeconds = Math.max(0, Math.round((Date.now() - (snapshot.lastActivityAt ?? snapshot.createdAt)) / 1000));
+    return `! stalled · idle ${idleSeconds}s`;
+  }
   const activity = snapshot.activities?.at(-1);
   if (activity) return `→ ${sanitizeTerminalText(activity)}`;
   const live = sanitizeTerminalText(snapshot.liveText ?? "").split("\n").filter(Boolean).at(-1)?.trim();
@@ -75,7 +80,7 @@ function aggregate(entries: readonly SubagentSnapshot[]) {
 
 function prioritized(entries: readonly SubagentSnapshot[]) {
   return [...entries].sort((a, b) => {
-    if ((a.status === "running") !== (b.status === "running")) return a.status === "running" ? -1 : 1;
+    if (isPendingSubagentStatus(a.status) !== isPendingSubagentStatus(b.status)) return isPendingSubagentStatus(a.status) ? -1 : 1;
     return (b.createdAt ?? 0) - (a.createdAt ?? 0);
   });
 }
@@ -87,10 +92,14 @@ export function renderSubagentMonitor(
   now = Date.now(),
 ) {
   const running = entries.filter((entry) => entry.status === "running").length;
+  const waiting = entries.filter((entry) => entry.status === "waiting").length;
+  const stalled = entries.filter((entry) => entry.status === "stalled").length;
   const done = entries.filter((entry) => entry.status === "done").length;
-  const failed = entries.length - running - done;
+  const failed = entries.length - running - waiting - stalled - done;
   const counts = [
     running ? `${running} running` : "",
+    waiting ? `${waiting} waiting` : "",
+    stalled ? `${stalled} stalled` : "",
     done ? `${done} done` : "",
     failed ? `${failed} failed` : "",
   ].filter(Boolean);
@@ -99,7 +108,7 @@ export function renderSubagentMonitor(
   const lines = [truncateToWidth(header, width)];
   const shown = prioritized(entries).slice(0, 4);
   for (const entry of shown) {
-    const color = entry.status === "done" ? "success" : entry.status === "running" ? "warning" : "error";
+    const color = entry.status === "done" ? "success" : entry.status === "running" || entry.status === "waiting" ? "warning" : "error";
     lines.push(truncateToWidth(
       `${theme.fg(color, "■")} ${theme.bold(sanitizeTerminalText(entry.title))} ${theme.fg("dim", `· ${entry.origin} · ${entry.id}`)}`,
       width,
@@ -114,7 +123,7 @@ export function renderSubagentMonitor(
 
 export function formatWaitingSubagents(entries: readonly SubagentSnapshot[], now = Date.now()) {
   return entries.map((entry) => [
-    `${entry.status === "running" ? "■" : entry.status === "done" ? "✓" : "✗"} ${entry.title} · ${entry.id}`,
+    `${isPendingSubagentStatus(entry.status) ? "■" : entry.status === "done" ? "✓" : "✗"} ${entry.title} · ${entry.id}`,
     `  ${formatSubagentUsage(entry, now)}`,
     `  ${currentActivity(entry)}`,
   ].join("\n")).join("\n");

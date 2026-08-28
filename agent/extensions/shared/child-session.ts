@@ -13,6 +13,8 @@ const CHILD_SHUTDOWN_TIMEOUT_MS = 5_000;
 /** Tools that headless children must not receive. Everything else stays enabled. */
 export const CHILD_EXCLUDED_TOOL_NAMES = [
   "subagent_spawn",
+  "subagent_profiles",
+  "subagent_message",
   "subagent_wait",
   "subagent_cancel",
   "subagent_check",
@@ -38,6 +40,8 @@ export interface ChildResourceOptions {
   noExtensions?: boolean;
   noSkills?: boolean;
   additionalSkillPaths?: string[];
+  additionalExtensionPaths?: string[];
+  contextFiles?: Array<{ path: string; content: string }>;
   noPromptTemplates?: boolean;
 }
 
@@ -54,7 +58,12 @@ export async function createChildResources(options: ChildResourceOptions) {
     ...(options.noExtensions ? { noExtensions: true } : {}),
     ...(options.noSkills ? { noSkills: true } : {}),
     ...(options.additionalSkillPaths ? { additionalSkillPaths: options.additionalSkillPaths } : {}),
+    ...(options.additionalExtensionPaths ? { additionalExtensionPaths: options.additionalExtensionPaths } : {}),
     ...(options.noPromptTemplates ? { noPromptTemplates: true } : {}),
+    ...(options.contextFiles ? {
+      noContextFiles: true,
+      agentsFilesOverride: () => ({ agentsFiles: options.contextFiles!.map((file) => ({ ...file })) }),
+    } : {}),
     ...(options.appendSystemPrompt
       ? { appendSystemPrompt: options.appendSystemPrompt }
       : {}),

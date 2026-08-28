@@ -1,7 +1,7 @@
 import type { ExtensionCommandContext, KeybindingsManager } from "@earendil-works/pi-coding-agent";
 import { Input, Markdown, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type Focusable, type MarkdownTheme, type TUI } from "@earendil-works/pi-tui";
 import type { SubagentManager } from "./manager.ts";
-import type { SubagentSnapshot } from "./domain.ts";
+import { isPendingSubagentStatus, type SubagentSnapshot } from "./domain.ts";
 import type { TranscriptEntry } from "../workflows/model.ts";
 import { formatContextUtilization } from "../shared/context-utilization.ts";
 import { sanitizeTerminalText } from "./presentation.ts";
@@ -48,17 +48,17 @@ export function renderTimelineBar(snapshot: Pick<SubagentSnapshot, "createdAt" |
   const start = position(snapshot.createdAt);
   const end = Math.max(start, position(snapshot.settledAt ?? window.end));
   const cells = Array.from({ length: size }, () => " ");
-  if (start === end) cells[start] = snapshot.status === "running" ? "▶" : "◆";
+  if (start === end) cells[start] = isPendingSubagentStatus(snapshot.status) ? "▶" : "◆";
   else {
     cells[start] = "├";
     for (let index = start + 1; index < end; index++) cells[index] = "━";
-    cells[end] = snapshot.status === "running" ? "▶" : "┤";
+    cells[end] = isPendingSubagentStatus(snapshot.status) ? "▶" : "┤";
   }
   return cells.join("");
 }
 
 function square(snapshot: SubagentSnapshot, theme: Theme) {
-  return theme.fg(snapshot.status === "done" ? "success" : snapshot.status === "running" ? "warning" : "error", "■");
+  return theme.fg(snapshot.status === "done" ? "success" : snapshot.status === "running" || snapshot.status === "waiting" ? "warning" : "error", "■");
 }
 
 export interface DashboardSelection { id?: string; index: number }
@@ -93,7 +93,7 @@ class Dashboard implements Component {
     if (this.keys.matches(data, "tui.select.down") || data === "j") this.selection.index = (this.selection.index + 1) % Math.max(1, entries.length);
     if (data === "g") this.selection.index = 0;
     if (data === "G") this.selection.index = Math.max(0, entries.length - 1);
-    if (data === "x") { const selected = entries[this.selection.index]; if (selected?.status === "running") void this.manager.cancel([selected.id]); }
+    if (data === "x") { const selected = entries[this.selection.index]; if (selected && isPendingSubagentStatus(selected.status)) void this.manager.cancel([selected.id]); }
     this.selection.id = entries[this.selection.index]?.id;
     this.tui.requestRender();
   }
@@ -122,7 +122,7 @@ class Dashboard implements Component {
       const ended = entry.settledAt ? clock(entry.settledAt) : "running ";
       if (wide) {
         const identity = padVisible(`${marker} ${square(entry, this.theme)} ${sanitizeTerminalText(entry.title)}`, titleWidth + 4);
-        const color = entry.status === "done" ? "success" : entry.status === "running" ? "warning" : "error";
+        const color = entry.status === "done" ? "success" : entry.status === "running" || entry.status === "waiting" ? "warning" : "error";
         const bar = this.theme.fg(color, renderTimelineBar(entry, window, timelineWidth));
         lines.push(truncateToWidth(`${identity}${clock(entry.createdAt)}  ${ended}  ${padVisible(elapsed(entry), 7)} ${bar}`, width));
       } else {
@@ -242,7 +242,7 @@ export class Takeover implements Component, Focusable {
   dispose() { this.unsubscribe(); clearInterval(this.timer); if (this.renderTimer) clearTimeout(this.renderTimer); }
   invalidate() { this.input.invalidate(); }
   handleInput(data: string) {
-    if (this.keys.matches(data, "app.clear") || data === "x") { const snapshot = this.manager.get(this.id); if (snapshot?.status === "running") void this.manager.cancel([this.id]); return; }
+    if (this.keys.matches(data, "app.clear") || data === "x") { const snapshot = this.manager.get(this.id); if (snapshot && isPendingSubagentStatus(snapshot.status)) void this.manager.cancel([this.id]); return; }
     if (this.inputMode) {
       if (this.keys.matches(data, "tui.select.cancel")) { this.inputMode = false; this.input.focused = false; this.tui.requestRender(); return; }
       this.input.handleInput(data); this.tui.requestRender(); return;
@@ -270,12 +270,12 @@ export class Takeover implements Component, Focusable {
     const end = transcript.length - this.offset;
     const body = transcript.slice(Math.max(0, end - viewport), end);
     while (body.length < viewport) body.push("");
-    const color = snapshot.status === "done" ? "success" : snapshot.status === "running" ? "warning" : "error";
+    const color = snapshot.status === "done" ? "success" : snapshot.status === "running" || snapshot.status === "waiting" ? "warning" : "error";
     const position = this.offset > 0 ? this.theme.fg("warning", ` · ${this.offset} line${this.offset === 1 ? "" : "s"} below`) : "";
     return [
       truncateToWidth(`${this.theme.fg("accent", "‹ Subagents /")} ${this.theme.bold(sanitizeTerminalText(snapshot.title))}`, width),
-      truncateToWidth(`${square(snapshot, this.theme)} ${this.theme.fg(color, snapshot.status)} · ${snapshot.origin} · ${snapshot.model}:${snapshot.thinking} · ${elapsed(snapshot)}${context ? ` · ${context}` : ""}${position}`, width),
-      truncateToWidth(this.theme.fg("dim", `Started ${fullTimestamp(snapshot.createdAt)} · Ended ${snapshot.settledAt ? fullTimestamp(snapshot.settledAt) : "running"} · ${snapshot.id}`), width),
+      truncateToWidth(`${square(snapshot, this.theme)} ${this.theme.fg(color, snapshot.status)} · ${snapshot.origin} · ${snapshot.model}:${snapshot.thinking} · ${snapshot.sessionMode} · ${elapsed(snapshot)}${context ? ` · ${context}` : ""}${position}`, width),
+      truncateToWidth(this.theme.fg("dim", `Started ${fullTimestamp(snapshot.createdAt)} · Ended ${snapshot.settledAt ? fullTimestamp(snapshot.settledAt) : "running"} · ${snapshot.name} (${snapshot.id})`), width),
       this.theme.fg("border", "─".repeat(width)),
       ...body.map((line) => truncateToWidth(line, width)),
       this.theme.fg("border", "─".repeat(width)),
@@ -283,7 +283,7 @@ export class Takeover implements Component, Focusable {
       ...(this.sendError ? [truncateToWidth(this.theme.fg("error", sanitizeTerminalText(this.sendError)), width)] : []),
       this.theme.fg("dim", this.inputMode
         ? "enter send · esc cancel"
-        : `j/k scroll · g/G top/bottom · pgup/pgdn page · i send guidance · h/esc back${snapshot.status === "running" ? " · x abort" : ""}`),
+        : `j/k scroll · g/G top/bottom · pgup/pgdn page · i send guidance · h/esc back${isPendingSubagentStatus(snapshot.status) ? " · x abort" : ""}`),
     ];
   }
 }

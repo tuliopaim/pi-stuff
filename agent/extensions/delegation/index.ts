@@ -1,13 +1,15 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Key, Markdown, Text, matchesKey } from "@earendil-works/pi-tui";
+import { getAgentDir, getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { StringEnum } from "@earendil-works/pi-ai";
+import { Box, Key, Markdown, Text, matchesKey } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { formatActivityStatus } from "../shared/activity-status.ts";
 import { showSubagents, showTakeover } from "./dashboard.ts";
 import { SubagentManager, truncateSubagentOutput } from "./manager.ts";
-import type { SubagentSnapshot } from "./domain.ts";
+import { isPendingSubagentStatus, type SubagentSnapshot } from "./domain.ts";
 import { formatSubagentUsage, formatWaitingSubagents, renderSubagentMonitor } from "./presentation.ts";
+import { discoverSubagentProfiles, resolveProfileSkillPaths } from "./profiles.ts";
 import { renderDelegationMessage } from "./render.ts";
 import {
   createDelegationDetails,
@@ -27,6 +29,7 @@ import {
 } from "./runtime.ts";
 
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+const SESSION_MODES = ["standalone", "lineage-only", "fork"] as const;
 
 // The model/thinking fields on the policies below are fallbacks used only when
 // no subagent preset is active. Whenever a preset is active, getDelegationConfig
@@ -180,8 +183,8 @@ Inspect the relevant code before editing. Make the smallest correct change, run 
 
 export default function (
   pi: ExtensionAPI,
-  createManager: (ctx: ExtensionContext, parentSessionId: string, onSettled: (snapshot: SubagentSnapshot) => void) => SubagentManager
-    = (ctx, parentSessionId, onSettled) => new SubagentManager(ctx, parentSessionId, onSettled),
+  createManager: (ctx: ExtensionContext, parentSessionId: string, onSettled: (snapshot: SubagentSnapshot) => void, onQuestion: (snapshot: SubagentSnapshot) => void) => SubagentManager
+    = (ctx, parentSessionId, onSettled, onQuestion) => new SubagentManager(ctx, parentSessionId, onSettled, { onQuestion }),
 ) {
   if (process.env.PI_DELEGATED === "1") return;
   registerDynamicRouteGuidance(pi);
@@ -192,6 +195,7 @@ export default function (
   let updateTimer: ReturnType<typeof setTimeout> | undefined;
   let monitorClock: ReturnType<typeof setInterval> | undefined;
   const acknowledged = new Set<string>();
+  const announcedQuestions = new Set<string>();
   const pendingResults = new Map<string, SubagentSnapshot>();
   const getManager = () => {
     if (!manager) throw new Error("Subagent manager is not ready yet.");
@@ -200,23 +204,23 @@ export default function (
   const updateStatus = () => {
     if (!context?.hasUI || !manager) return;
     const entries = manager.list();
-    const running = entries.filter((entry) => entry.status === "running").length;
+    const running = entries.filter((entry) => isPendingSubagentStatus(entry.status)).length;
     const done = entries.filter((entry) => entry.status === "done" && !acknowledged.has(entry.id)).length;
-    const failed = entries.filter((entry) => entry.status !== "running" && entry.status !== "done" && !acknowledged.has(entry.id)).length;
+    const failed = entries.filter((entry) => !isPendingSubagentStatus(entry.status) && entry.status !== "done" && !acknowledged.has(entry.id)).length;
     context.ui.setStatus("subagents", running || done || failed
       ? formatActivityStatus(context.ui.theme, "subagents", { running, done, failed })
       : undefined);
     // Foreground one-off agents already own a tool card. The persistent monitor
     // is only for subagent_spawn jobs that otherwise have no live home.
     const monitored = entries.filter((entry) =>
-      entry.origin === "generic" && (entry.status === "running" || !entry.consumed));
+      entry.origin === "generic" && (isPendingSubagentStatus(entry.status) || !entry.consumed));
     context.ui.setWidget?.("subagents-monitor", monitored.length
       ? (_tui, theme) => ({
           render: (width) => renderSubagentMonitor(monitored, width, theme),
           invalidate() {},
         })
       : undefined);
-    const shouldTick = monitored.some((entry) => entry.status === "running");
+    const shouldTick = monitored.some((entry) => entry.status === "running" || entry.status === "stalled");
     if (shouldTick && !monitorClock) {
       monitorClock = setInterval(updateStatus, 1_000);
       monitorClock.unref?.();
@@ -243,7 +247,7 @@ export default function (
         answer, error: snapshot.error, sessionFile: snapshot.sessionFile,
       });
       context.ui.notify(`By the way “${snapshot.title}” ${snapshot.status === "done" ? "answered" : "failed"} — /subagents to reopen`, snapshot.status === "done" ? "info" : "error");
-    } else if (snapshot.origin === "generic" && !snapshot.consumed) {
+    } else if (!snapshot.consumed) {
       pendingResults.set(snapshot.id, { ...snapshot });
       if (context.isIdle()) flushResults();
     }
@@ -255,21 +259,33 @@ export default function (
       try {
         pi.sendMessage({
           customType: "subagent-result", display: true,
-          content: `Subagent ${snapshot.id} “${snapshot.title}” ${snapshot.status}.\n${formatSubagentUsage(snapshot)}\n\n${snapshot.error ? `Error: ${snapshot.error}\n\n` : ""}${bounded.output}`,
-          details: { id: snapshot.id, title: snapshot.title, status: snapshot.status },
+          content: `Subagent ${snapshot.name} (${snapshot.id}) “${snapshot.title}” ${snapshot.status}.\n${formatSubagentUsage(snapshot)}\n\n${snapshot.error ? `Error: ${snapshot.error}\n\n` : ""}${bounded.output}`,
+          details: { id: snapshot.id, name: snapshot.name, title: snapshot.title, status: snapshot.status },
         }, { deliverAs: "followUp", triggerTurn: true });
         manager?.consume(snapshot.id);
         pendingResults.delete(snapshot.id);
       } catch {}
     }
   };
+  const announceQuestion = (snapshot: SubagentSnapshot) => {
+    if (!snapshot.question || snapshot.origin === "btw") return;
+    const key = `${snapshot.id}:${snapshot.question.askedAt}`;
+    if (announcedQuestions.has(key)) return;
+    pi.sendMessage({
+      customType: "subagent-question", display: true,
+      content: `Subagent ${snapshot.name} (${snapshot.id}) is waiting for your answer.\n\n${snapshot.question.text}\n\nReply with: subagent_message({ name: "${snapshot.name}", message: "..." })`,
+      details: { id: snapshot.id, name: snapshot.name, question: snapshot.question.text },
+    }, { deliverAs: "steer", triggerTurn: true });
+    announcedQuestions.add(key);
+  };
 
   pi.on("session_start", (_event, ctx) => {
     context = ctx;
-    manager = createManager(ctx, ctx.sessionManager.getSessionId(), settled);
+    manager = createManager(ctx, ctx.sessionManager.getSessionId(), settled, announceQuestion);
     for (const entry of manager.list()) {
-      if (entry.status !== "running") acknowledged.add(entry.id);
-      if (entry.origin === "generic" && entry.status !== "running" && !entry.consumed) pendingResults.set(entry.id, entry);
+      if (!isPendingSubagentStatus(entry.status)) acknowledged.add(entry.id);
+      if (entry.origin === "generic" && !isPendingSubagentStatus(entry.status) && !entry.consumed) pendingResults.set(entry.id, entry);
+      if (entry.status === "waiting") announceQuestion(entry);
     }
     unsubscribe = manager.subscribe(scheduleUpdate);
     updateStatus();
@@ -287,6 +303,7 @@ export default function (
     ctx.ui.setStatus("subagents", undefined);
     ctx.ui.setWidget?.("subagents-monitor", undefined);
     pendingResults.clear();
+    announcedQuestions.clear();
     const closing = manager; manager = undefined; context = undefined;
     await closing?.shutdown();
   });
@@ -364,13 +381,22 @@ export default function (
     ],
     parameters: Type.Object({
       task: Type.String({ description: "Self-contained task" }),
-      name: Type.String({ description: "Short display name" }),
+      name: Type.Optional(Type.String({ description: "Short display name; defaults to the profile or subagent" })),
+      agent: Type.Optional(Type.String({ description: "Declarative agent profile name from subagent_profiles" })),
       model: Type.Optional(Type.String({ description: "Exact provider/model id (required unless `route` is given)" })),
       thinking: Type.Optional(Type.String({ description: "off|minimal|low|medium|high|xhigh|max (required unless `route` is given)" })),
       route: Type.Optional(Type.String({ description: "Route id or provider/model from the active preset; overrides `model`/`thinking`" })),
       working_dir: Type.Optional(Type.String({ description: "Working directory; defaults to the parent cwd" })),
+      session_mode: Type.Optional(StringEnum(SESSION_MODES, { description: "standalone, lineage-only, or fork; fork copies parent conversation context" })),
     }),
     async execute(_id, params, signal, _update, ctx) {
+      const discovery = discoverSubagentProfiles({ agentDir: getAgentDir(), cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted() });
+      const profileName = optionalString(params.agent);
+      const profile = profileName ? discovery.profiles.find((candidate) => candidate.name === profileName) : undefined;
+      if (profileName && !profile) {
+        const diagnostics = discovery.errors.map((item) => `${item.path}: ${item.error}`).join("\n");
+        throw new Error(`Unknown subagent profile "${profileName}".${diagnostics ? `\nProfile errors:\n${diagnostics}` : ""}`);
+      }
       let model: string;
       let thinking: string;
       const routeRef = optionalString(params.route);
@@ -378,25 +404,42 @@ export default function (
         const route = resolveRouteRef(routeRef);
         model = route.model;
         thinking = route.thinking;
-      } else {
-        if (!optionalString(params.model) || !optionalString(params.thinking)) {
-          throw new Error("Provide either `route` or both `model` and `thinking`.");
-        }
+      } else if (optionalString(params.model) || optionalString(params.thinking)) {
+        if (!optionalString(params.model) || !optionalString(params.thinking)) throw new Error("Provide both `model` and `thinking`.");
         if (!THINKING_LEVELS.has(params.thinking)) throw new Error(`Invalid thinking level: ${params.thinking}`);
         const v = validateRoute(params.model, params.thinking);
         if (!v.allowed) throw new Error(v.error);
         model = params.model;
         thinking = params.thinking;
+      } else if (profile?.route) {
+        const route = resolveRouteRef(profile.route);
+        model = route.model;
+        thinking = route.thinking;
+      } else if (profile?.model && profile.thinking) {
+        const v = validateRoute(profile.model, profile.thinking);
+        if (!v.allowed) throw new Error(v.error);
+        model = profile.model;
+        thinking = profile.thinking;
+      } else {
+        throw new Error("Provide `agent`, `route`, or both `model` and `thinking`.");
       }
-      const cwd = path.resolve(ctx.cwd, params.working_dir ?? ".");
+      const cwd = params.working_dir ? path.resolve(ctx.cwd, params.working_dir) : profile?.cwd ?? ctx.cwd;
       if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) throw new Error(`working_dir is not a directory: ${cwd}`);
+      const name = optionalString(params.name) ?? profile?.name ?? "subagent";
+      const sessionMode = params.session_mode ?? profile?.sessionMode ?? "standalone";
+      const profileSkillPaths = profile ? await resolveProfileSkillPaths(profile, {
+        agentDir: getAgentDir(), cwd, projectTrusted: ctx.isProjectTrusted(),
+      }) : undefined;
       const snapshot = await getManager().spawn({
-        origin: "generic", title: params.name.trim() || "subagent", task: params.task, cwd,
-        model, thinking, mutating: true,
-        config: { name: "Agent", prompt: AGENT.prompt, timeoutMs: AGENT.timeoutMs, inheritResources: true },
+        origin: "generic", name, title: name, task: params.task, cwd,
+        model, thinking, sessionMode, parentSessionFile: ctx.sessionManager.getSessionFile(), mutating: profile?.mutating ?? true,
+        config: profile ? {
+          name: profile.name, prompt: profile.prompt, timeoutMs: profile.timeoutMs, tools: profile.tools,
+          skills: profileSkillPaths, inheritResources: profile.inheritResources,
+        } : { name: "Agent", prompt: AGENT.prompt, timeoutMs: AGENT.timeoutMs, inheritResources: true },
         signal,
       });
-      return { content: [{ type: "text", text: `Started ${snapshot.id} “${snapshot.title}” in ${cwd}.` }], details: { id: snapshot.id, status: snapshot.status } };
+      return { content: [{ type: "text", text: `Started ${snapshot.name} (${snapshot.id}) “${snapshot.title}” in ${cwd}.` }], details: { id: snapshot.id, name: snapshot.name, status: snapshot.status, sessionMode: snapshot.sessionMode } };
     },
     renderCall(args, theme) {
       const name = typeof args.name === "string" && args.name.trim() ? args.name.trim() : "subagent";
@@ -409,14 +452,49 @@ export default function (
   });
 
   pi.registerTool({
+    name: "subagent_profiles", label: "List Subagent Profiles",
+    description: "List available declarative background-agent profiles and any profile errors.", parameters: Type.Object({}),
+    async execute(_id, _params, _signal, _update, ctx) {
+      const discovery = discoverSubagentProfiles({ agentDir: getAgentDir(), cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted() });
+      const profiles = discovery.profiles.map((profile) =>
+        `${profile.name} [${profile.source}] ${profile.description || "(no description)"} · ${profile.route ? `route ${profile.route}` : profile.model ? `${profile.model}:${profile.thinking}` : "model required at spawn"} · ${profile.mutating ? "mutating" : "read-only"} · ${profile.sessionMode}`);
+      const errors = discovery.errors.map((item) => `ERROR ${item.path}: ${item.error}`);
+      return { content: [{ type: "text", text: [...profiles, ...errors].join("\n") || "No subagent profiles." }], details: discovery };
+    },
+  });
+
+  pi.registerTool({
+    name: "subagent_message", label: "Message Subagent",
+    description: "Send guidance to a tracked subagent by its stable name, answer a waiting question, or continue a settled child session.",
+    parameters: Type.Object({
+      name: Type.String({ minLength: 1, description: "Exact stable subagent name" }),
+      message: Type.String({ minLength: 1, description: "Guidance, answer, or continuation prompt" }),
+    }),
+    async execute(_id, params) {
+      const manager = getManager();
+      const snapshot = manager.resolve(params.name);
+      if (!snapshot || snapshot.name !== params.name || snapshot.origin === "btw") {
+        const names = manager.list().filter((entry) => entry.origin !== "btw").map((entry) => entry.name);
+        throw new Error(`Unknown subagent name "${params.name}".${names.length ? ` Known names: ${names.join(", ")}.` : ""}`);
+      }
+      if (!params.message.trim()) throw new Error("Message must not be empty.");
+      await manager.send(snapshot.id, params.message);
+      return {
+        content: [{ type: "text", text: `Message sent to ${snapshot.name} (${snapshot.id}).` }],
+        details: { id: snapshot.id, name: snapshot.name, status: snapshot.status, sessionMode: snapshot.sessionMode },
+      };
+    },
+  });
+
+  pi.registerTool({
     name: "subagent_wait", label: "Wait for Subagents", description: "Wait for background subagents and return their results.",
     parameters: Type.Object({ ids: Type.Array(Type.String(), { maxItems: 64 }) }),
     async execute(_id, params, signal, onUpdate) {
       const ids = [...new Set(params.ids)];
       if (!ids.length) throw new Error("Provide at least one subagent id.");
-      if (ids.some((id) => getManager().get(id)?.origin === "btw")) throw new Error("By-the-way sessions are only available through the TUI.");
+      if (ids.some((id) => getManager().resolve(id)?.origin === "btw")) throw new Error("By-the-way sessions are only available through the TUI.");
       const emit = () => {
-        const entries = ids.map((id) => getManager().get(id)).filter((entry): entry is SubagentSnapshot => Boolean(entry));
+        const entries = ids.map((id) => getManager().resolve(id)).filter((entry): entry is SubagentSnapshot => Boolean(entry));
         onUpdate?.({ content: [{ type: "text", text: formatWaitingSubagents(entries) }], details: { pending: ids } });
       };
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -431,8 +509,8 @@ export default function (
         unsubscribeWait?.();
         if (timer) clearTimeout(timer);
       }
-      for (const id of ids) { getManager().consume(id); pendingResults.delete(id); }
-      const combined = snapshots.map((snapshot) => `## ${snapshot.id} “${snapshot.title}” — ${snapshot.status}\n${formatSubagentUsage(snapshot)}\n${snapshot.error ? `Error: ${snapshot.error}\n` : ""}${truncateSubagentOutput(snapshot.output || "(no output)", 200, 16 * 1024, "[output truncated]", snapshot.sessionFile).output}`).join("\n\n---\n\n");
+      for (const snapshot of snapshots) { getManager().consume(snapshot.id); pendingResults.delete(snapshot.id); }
+      const combined = snapshots.map((snapshot) => `## ${snapshot.name} (${snapshot.id}) “${snapshot.title}” — ${snapshot.status}\n${formatSubagentUsage(snapshot)}\n${snapshot.error ? `Error: ${snapshot.error}\n` : ""}${truncateSubagentOutput(snapshot.output || "(no output)", 200, 16 * 1024, "[output truncated]", snapshot.sessionFile).output}`).join("\n\n---\n\n");
       const text = truncateSubagentOutput(combined, 800, 64 * 1024, "[combined subagent output truncated]").output;
       return { content: [{ type: "text", text }], details: { results: snapshots.map(({ id, status }) => ({ id, status })) } };
     },
@@ -442,7 +520,7 @@ export default function (
     name: "subagent_cancel", label: "Cancel Subagents", description: "Cancel running background subagents.",
     parameters: Type.Object({ ids: Type.Array(Type.String()) }),
     async execute(_id, params) {
-      if (params.ids.some((id) => getManager().get(id)?.origin === "btw")) throw new Error("By-the-way sessions are only available through the TUI.");
+      if (params.ids.some((id) => getManager().resolve(id)?.origin === "btw")) throw new Error("By-the-way sessions are only available through the TUI.");
       const snapshots = await getManager().cancel([...new Set(params.ids)]);
       for (const snapshot of snapshots) pendingResults.delete(snapshot.id);
       return { content: [{ type: "text", text: snapshots.map((snapshot) => `${snapshot.id}: ${snapshot.status}`).join("\n") }], details: { results: snapshots.map(({ id, status }) => ({ id, status })) } };
@@ -453,10 +531,10 @@ export default function (
     name: "subagent_check", label: "Check Subagent", description: "Check one subagent's status and recent output.",
     parameters: Type.Object({ id: Type.String() }),
     async execute(_id, params) {
-      const snapshot = getManager().get(params.id);
+      const snapshot = getManager().resolve(params.id);
       if (!snapshot || snapshot.origin === "btw") throw new Error(`Unknown subagent id "${params.id}".`);
       const preview = (snapshot.liveText || snapshot.output || "(no output yet)").slice(-2048);
-      return { content: [{ type: "text", text: `${snapshot.id} [${snapshot.status}] “${snapshot.title}”\n${formatSubagentUsage(snapshot)}\n${preview}` }], details: { id: snapshot.id, status: snapshot.status } };
+      return { content: [{ type: "text", text: `${snapshot.name} (${snapshot.id}) [${snapshot.status}] “${snapshot.title}”\n${formatSubagentUsage(snapshot)}\n${preview}` }], details: { id: snapshot.id, name: snapshot.name, status: snapshot.status, sessionMode: snapshot.sessionMode } };
     },
   });
 
@@ -464,13 +542,21 @@ export default function (
     name: "subagent_list", label: "List Subagents", description: "List tracked model-facing subagents.", parameters: Type.Object({}),
     async execute() {
       const entries = getManager().list().filter((entry) => entry.origin !== "btw");
-      return { content: [{ type: "text", text: entries.length ? entries.map((entry) => `${entry.id} [${entry.status}] “${entry.title}” (${entry.model}:${entry.thinking}, ${entry.cwd})`).join("\n") : "No subagents." }], details: { subagents: entries.map(({ id, title, status, origin }) => ({ id, title, status, origin })) } };
+      return { content: [{ type: "text", text: entries.length ? entries.map((entry) => `${entry.name} (${entry.id}) [${entry.status}] “${entry.title}” (${entry.model}:${entry.thinking}, ${entry.sessionMode}, ${entry.cwd})`).join("\n") : "No subagents." }], details: { subagents: entries.map(({ id, name, title, status, origin, sessionMode }) => ({ id, name, title, status, origin, sessionMode })) } };
     },
   });
 
-  pi.registerMessageRenderer("subagent-result", (message, { expanded }, theme) => {
+  pi.registerMessageRenderer("subagent-result", (message) => {
     const content = typeof message.content === "string" ? message.content : "";
-    return expanded ? new Markdown(content, 0, 0, getMarkdownTheme()) : new Text(content.split("\n").slice(0, 9).join("\n"), 0, 0);
+    const box = new Box(1, 0);
+    box.addChild(new Markdown(content, 0, 0, getMarkdownTheme()));
+    return box;
+  });
+  pi.registerMessageRenderer("subagent-question", (message, _options, theme) => {
+    const content = typeof message.content === "string" ? message.content : "";
+    const box = new Box(1, 0);
+    box.addChild(new Text(theme.fg("warning", content), 0, 0));
+    return box;
   });
   pi.registerEntryRenderer("btw-result", (entry, { expanded }, theme) => {
     const data = entry.data as any;
@@ -487,7 +573,7 @@ export default function (
         return;
       }
       await showSubagents(ctx, getManager(), args.trim() || undefined);
-      for (const entry of getManager().list()) if (entry.status !== "running") acknowledged.add(entry.id);
+      for (const entry of getManager().list()) if (!isPendingSubagentStatus(entry.status)) acknowledged.add(entry.id);
       updateStatus();
     },
   });
@@ -501,8 +587,8 @@ export default function (
       const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
       if (!model) { ctx.ui.notify("No active model", "error"); return; }
       const snapshot = await getManager().spawn({
-        origin: "btw", title: task.split(/\s+/).slice(0, 8).join(" "), task, cwd: ctx.cwd,
-        model, thinking: pi.getThinkingLevel(), mutating: false,
+        origin: "btw", name: "btw", title: task.split(/\s+/).slice(0, 8).join(" "), task, cwd: ctx.cwd,
+        model, thinking: pi.getThinkingLevel(), sessionMode: "standalone", mutating: false,
         config: { name: "By the way", prompt: "Answer the user's one-off side question concisely. Do not modify files.", timeoutMs: 15 * 60_000, tools: "read,grep,find,ls", inheritResources: false },
       });
       await showTakeover(ctx, getManager(), snapshot.id);

@@ -253,6 +253,8 @@ test("workflow agents require explicit provider, model, and effort", () => {
 test("workflow children cannot recursively delegate", () => {
   assert.deepEqual(childToolPolicy().excludeTools, [
     "subagent_spawn",
+    "subagent_profiles",
+    "subagent_message",
     "subagent_wait",
     "subagent_cancel",
     "subagent_check",

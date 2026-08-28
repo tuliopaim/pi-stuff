@@ -226,7 +226,7 @@ export function optionalString(value: unknown): string | undefined {
  * wins over everything else (the user's pick); dynamic-model tools otherwise
  * require their raw model/thinking pair.
  */
-export function callOverrides(policy: DelegationPolicy, params: any): Pick<DelegationConfig, "model" | "thinking"> {
+export function callOverrides(policy: DelegationPolicy, params: any): Partial<Pick<DelegationConfig, "model" | "thinking">> {
   const routeRef = optionalString(params?.route);
   if (routeRef) {
     const route = resolveRouteRef(routeRef);
@@ -271,7 +271,7 @@ export interface DelegationPolicy extends DelegationConfig {
   readonly truncationMessage: string;
 }
 
-export type DelegationStatus = "running" | "done" | "cancelled" | "failed";
+export type DelegationStatus = "running" | "waiting" | "stalled" | "done" | "cancelled" | "failed";
 
 /** Thrown when a delegated run is stopped through its AbortSignal rather than failing on its own. */
 export class DelegationAbortError extends Error {
@@ -282,9 +282,12 @@ export class DelegationAbortError extends Error {
 }
 
 export interface DelegationDetails {
+  id?: string;
+  name?: string;
   task: string;
   model: string;
   thinking: string;
+  sessionMode?: "standalone" | "lineage-only" | "fork";
   prompt: string;
   status: DelegationStatus;
   /** Set when the run ended in "cancelled" or "failed"; shown next to the status label. */
@@ -330,7 +333,7 @@ export function registerDelegatedTool(pi: ExtensionAPI, policy: DelegationPolicy
     cwd: string,
     signal?: AbortSignal,
     onUpdate?: (details: DelegationDetails) => void,
-    overrides?: Pick<DelegationConfig, "model" | "thinking">,
+    overrides?: Partial<Pick<DelegationConfig, "model" | "thinking">>,
   ) => {
     const config = { ...resolveConfig(), ...overrides };
     const manager = getManager();
@@ -338,11 +341,13 @@ export function registerDelegatedTool(pi: ExtensionAPI, policy: DelegationPolicy
     try {
       snapshot = await manager.spawn({
         origin: policy.key as "scout" | "review" | "commit" | "agent",
+        name: policy.key,
         title: `${policy.name}: ${task}`,
         task,
         cwd,
         model: config.model,
         thinking: config.thinking,
+        sessionMode: "standalone",
         mutating: policy.mutating,
         config,
         consumed: true,
@@ -356,11 +361,16 @@ export function registerDelegatedTool(pi: ExtensionAPI, policy: DelegationPolicy
     const unsubscribe = manager.subscribeTo(snapshot.id, emit);
     emit();
     try {
-      await manager.wait([snapshot.id]);
+      await manager.waitUntilPaused(snapshot.id, signal);
     } finally {
       unsubscribe();
     }
     if (snapshot.status === "cancelled") throw new DelegationAbortError();
+    if (snapshot.status === "waiting") {
+      const details = delegationDetails(snapshot, config) as DelegationDetails;
+      details.output = `Waiting for the parent: ${snapshot.question?.text ?? "question unavailable"}\n\nReply with subagent_message({ name: "${snapshot.name}", message: "..." }).`;
+      return details;
+    }
     if (snapshot.status !== "done") throw new Error(snapshot.error ?? `${policy.name} failed`);
     const details = delegationDetails(snapshot, config) as DelegationDetails;
     const output = details.output || policy.emptyOutput;

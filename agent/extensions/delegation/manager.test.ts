@@ -25,6 +25,7 @@ class FakeSession {
   constructor(pending = false) { this.pending = pending; }
   subscribe(listener: (event: any) => void) { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   private emit(event: any) { for (const listener of this.listeners) listener(event); }
+  emitEvent(event: any) { this.emit(event); }
   async bindExtensions() { if (this.failBind) throw new Error("bind failed"); }
   getContextUsage() { return { tokens: 30, contextWindow: 1000, percent: 3 }; }
   clearQueue() { this.queueClears++; return { steering: [], followUp: [] }; }
@@ -43,15 +44,19 @@ class FakeSession {
     this.isStreaming = false; this.emit({ type: "agent_settled" });
   }
   async steer(text: string) { return this.prompt(text); }
+  finishPending() { this.release?.(); }
   async abort() { this.abortCalls++; if (this.stuckAbort) return new Promise<void>(() => {}); this.isStreaming = false; this.release?.(); }
   dispose() { this.disposed = true; this.release?.(); }
   getAllTools() { return []; }
+  activeTools: string[] = [];
+  getActiveToolNames() { return this.activeTools; }
   getToolDefinition() { return undefined; }
 }
 
-function harness(options: { pending?: boolean; registryFile?: string; parentSessionId?: string; onSettled?: (snapshot: any) => void; stuckAbort?: boolean; failBind?: boolean; resourceGate?: Promise<void>; preflightGate?: Promise<void>; createFail?: boolean } = {}) {
+function harness(options: { pending?: boolean; registryFile?: string; parentSessionId?: string; onSettled?: (snapshot: any) => void; stuckAbort?: boolean; failBind?: boolean; resourceGate?: Promise<void>; preflightGate?: Promise<void>; createFail?: boolean; stallAfterMs?: number; extensionPaths?: string[]; skillPaths?: string[]; contextFiles?: Array<{ path: string; content: string }> } = {}) {
   const sessions: FakeSession[] = [];
   const sessionOptions: any[] = [];
+  const sessionManagerOptions: any[] = [];
   const resourceOptions: any[] = [];
   const manager = new SubagentManager({
     cwd: process.cwd(),
@@ -59,28 +64,92 @@ function harness(options: { pending?: boolean; registryFile?: string; parentSess
     isProjectTrusted: () => true,
   }, options.parentSessionId ?? "parent-test", options.onSettled, {
     registryFile: options.registryFile ?? join(mkdtempSync(join(tmpdir(), "subagents-manager-")), "registry.json"),
-    createResources: async (resourceConfig) => { resourceOptions.push(resourceConfig); await options.resourceGate; return ({ loader: {}, settingsManager: {} }) as any; },
-    createSessionManager: () => ({}) as any,
+    createResources: async (resourceConfig) => {
+      resourceOptions.push(resourceConfig); await options.resourceGate;
+      return ({
+        loader: {
+          getExtensions: () => ({ extensions: (options.extensionPaths ?? []).map((resolvedPath) => ({ resolvedPath })) }),
+          getSkills: () => ({ skills: (options.skillPaths ?? []).map((filePath) => ({ filePath })) }),
+          getAgentsFiles: () => ({ agentsFiles: options.contextFiles ?? [] }),
+        },
+        settingsManager: {},
+      }) as any;
+    },
+    createSessionManager: (managerOptions: any) => { sessionManagerOptions.push(managerOptions); return ({}) as any; },
     createSession: async (sessionConfig) => {
       sessionOptions.push(sessionConfig);
       if (options.createFail) throw new Error("create failed");
       const session = new FakeSession(options.pending);
+      session.activeTools = sessionConfig.tools ?? ["read", "bash", "edit", "write", "ask_question"];
       session.stuckAbort = options.stuckAbort ?? false;
       session.failBind = options.failBind ?? false;
       session.preflightGate = options.preflightGate;
       sessions.push(session);
       return { session } as any;
-    }, abortTimeoutMs: 10,
+    }, abortTimeoutMs: 10, stallAfterMs: options.stallAfterMs,
   });
-  return { manager, sessions, sessionOptions, resourceOptions };
+  return { manager, sessions, sessionOptions, sessionManagerOptions, resourceOptions };
 }
 
 function spawnOptions(overrides: Partial<SpawnOptions> = {}): SpawnOptions {
   return {
-    origin: "generic", title: "test", task: "do it", cwd: process.cwd(), model: "test/model", thinking: "low",
+    origin: "generic", name: "test", title: "test", task: "do it", cwd: process.cwd(), model: "test/model", thinking: "low", sessionMode: "standalone",
     mutating: false, config: { name: "Agent", prompt: "prompt", timeoutMs: 10_000 }, ...overrides,
   };
 }
+
+test("manager creates standalone, lineage-only, and fork child sessions", async () => {
+  const { manager, sessionManagerOptions } = harness();
+  await manager.spawn(spawnOptions({ name: "standalone", sessionMode: "standalone" }));
+  await manager.spawn(spawnOptions({ name: "lineage", sessionMode: "lineage-only", parentSessionFile: "/tmp/parent.jsonl" }));
+  await manager.spawn(spawnOptions({ name: "fork", sessionMode: "fork", parentSessionFile: "/tmp/parent.jsonl" }));
+  assert.deepEqual(sessionManagerOptions, [
+    { cwd: process.cwd(), sessionMode: "standalone", parentSessionFile: undefined, sessionFile: undefined },
+    { cwd: process.cwd(), sessionMode: "lineage-only", parentSessionFile: "/tmp/parent.jsonl", sessionFile: undefined },
+    { cwd: process.cwd(), sessionMode: "fork", parentSessionFile: "/tmp/parent.jsonl", sessionFile: undefined },
+  ]);
+  await manager.shutdown();
+});
+
+test("resolved child loadouts are persisted and replayed exactly", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "subagents-loadout-"));
+  const registryFile = join(dir, "registry.json");
+  const extensionPath = join(dir, "extension.ts");
+  const skillPath = join(dir, "SKILL.md");
+  writeFileSync(extensionPath, "export default () => {};");
+  writeFileSync(skillPath, "# Skill");
+  try {
+    const contextFile = { path: join(dir, "AGENTS.md"), content: "fixed instructions" };
+    const initial = harness({ registryFile, extensionPaths: [extensionPath], skillPaths: [skillPath], contextFiles: [contextFile] });
+    const snapshot = await initial.manager.spawn(spawnOptions({ config: { name: "Agent", prompt: "fixed prompt", timeoutMs: 10_000, inheritResources: true } }));
+    await initial.manager.wait([snapshot.id]);
+    await initial.manager.shutdown();
+
+    const restored = harness({ registryFile });
+    await restored.manager.send(snapshot.id, "continue");
+    await restored.manager.wait([snapshot.id]);
+    assert.equal(restored.resourceOptions[0].noExtensions, true);
+    assert.equal(restored.resourceOptions[0].noSkills, true);
+    assert.deepEqual(restored.resourceOptions[0].additionalExtensionPaths, [extensionPath]);
+    assert.deepEqual(restored.resourceOptions[0].additionalSkillPaths, [skillPath]);
+    assert.deepEqual(restored.resourceOptions[0].appendSystemPrompt, ["fixed prompt"]);
+    assert.deepEqual(restored.resourceOptions[0].contextFiles, [contextFile]);
+    assert.deepEqual(restored.sessionOptions[0].tools, ["read", "bash", "edit", "write", "ask_question"]);
+    await restored.manager.shutdown();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("manager assigns stable unique names and resolves names or IDs", async () => {
+  const { manager } = harness();
+  const first = await manager.spawn(spawnOptions({ name: "  Code Review!  " }));
+  const second = await manager.spawn(spawnOptions({ name: "code-review" }));
+  assert.equal(first.name, "code-review");
+  assert.equal(second.name, "code-review-2");
+  assert.equal(manager.getByName("code-review"), first);
+  assert.equal(manager.resolve(second.id), second);
+  assert.equal(manager.resolve("code-review-2"), second);
+  await manager.shutdown();
+});
 
 test("manager assigns IDs, settles, waits, and captures output", async () => {
   const { manager } = harness();
@@ -109,7 +178,7 @@ test("focused policies keep their SDK tool allowlist and recursive denylist", as
     config: { name: "Scout", prompt: "prompt", timeoutMs: 10_000, tools: "read,grep,find,ls" },
   }));
   await manager.wait([snapshot.id]);
-  assert.deepEqual(sessionOptions[0].tools, ["read", "grep", "find", "ls"]);
+  assert.deepEqual(sessionOptions[0].tools, ["read", "grep", "find", "ls", "ask_question"]);
   assert.ok(sessionOptions[0].excludeTools.includes("agent"));
   assert.ok(sessionOptions[0].excludeTools.includes("workflow"));
   assert.ok(sessionOptions[0].excludeTools.includes("ask_user"));
@@ -174,6 +243,77 @@ test("continuing a consumed generic subagent makes the new result deliverable", 
   await manager.send(snapshot.id, "continue");
   while (snapshot.status === "running") await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(settled, [true, false]);
+  await manager.shutdown();
+});
+
+test("a child question parks the run until the parent answers", async () => {
+  let releasePrompt!: () => void;
+  const preflightGate = new Promise<void>((resolve) => { releasePrompt = resolve; });
+  const { manager, sessionOptions } = harness({ preflightGate });
+  const snapshot = await manager.spawn(spawnOptions({ name: "researcher" }));
+  const tool = sessionOptions[0].customTools.find((candidate: any) => candidate.name === "ask_question");
+  const result = await tool.execute("question", { question: "Which branch should I inspect?" });
+  assert.equal(result.terminate, true);
+  releasePrompt();
+  while (snapshot.status === "running") await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(snapshot.status, "waiting");
+  assert.equal(snapshot.question?.text, "Which branch should I inspect?");
+  const waiting = manager.wait([snapshot.id]);
+  assert.equal(await Promise.race([waiting.then(() => "settled"), new Promise((resolve) => setTimeout(() => resolve("pending"), 10))]), "pending");
+  await manager.send(snapshot.id, "main");
+  const [done] = await waiting;
+  assert.equal(done.status, "done");
+  assert.equal(done.question, undefined);
+  await manager.shutdown();
+});
+
+test("waiting questions survive a parent restart and resume the saved session", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "subagents-waiting-restore-"));
+  const registryFile = join(dir, "registry.json");
+  let releasePrompt!: () => void;
+  const preflightGate = new Promise<void>((resolve) => { releasePrompt = resolve; });
+  try {
+    const initial = harness({ registryFile, preflightGate });
+    const snapshot = await initial.manager.spawn(spawnOptions({ name: "researcher" }));
+    const tool = initial.sessionOptions[0].customTools.find((candidate: any) => candidate.name === "ask_question");
+    await tool.execute("question", { question: "Which branch?" });
+    releasePrompt();
+    while (snapshot.status === "running") await new Promise((resolve) => setImmediate(resolve));
+    await initial.manager.shutdown();
+
+    const restored = harness({ registryFile });
+    const waiting = restored.manager.get(snapshot.id)!;
+    assert.equal(waiting.status, "waiting");
+    assert.equal(waiting.question?.text, "Which branch?");
+    await restored.manager.send(snapshot.id, "main");
+    const [done] = await restored.manager.wait([snapshot.id]);
+    assert.equal(done.status, "done");
+    await restored.manager.shutdown();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("running children become stalled and recover on the next child event", async () => {
+  const { manager, sessions } = harness({ pending: true, stallAfterMs: 10 });
+  const snapshot = await manager.spawn(spawnOptions());
+  manager.refreshStatuses(snapshot.lastActivityAt + 11);
+  assert.equal(snapshot.status, "stalled");
+  sessions[0].emitEvent({ type: "queue_update", steering: [], followUp: [] });
+  assert.equal(snapshot.status, "running");
+  await manager.cancel([snapshot.id]);
+  await manager.shutdown();
+});
+
+test("a waiting child can be answered while three other children are pending", async () => {
+  const { manager, sessions, sessionOptions } = harness({ pending: true });
+  const waiting = await manager.spawn(spawnOptions({ name: "waiting" }));
+  const tool = sessionOptions[0].customTools.find((candidate: any) => candidate.name === "ask_question");
+  await tool.execute("question", { question: "Continue?" });
+  sessions[0].finishPending();
+  while (waiting.status === "running") await new Promise((resolve) => setImmediate(resolve));
+  for (let index = 0; index < 3; index++) await manager.spawn(spawnOptions({ name: `other-${index}` }));
+  await manager.send(waiting.id, "yes");
+  assert.equal(waiting.status, "running");
+  await manager.cancel(manager.list().map((entry) => entry.id));
   await manager.shutdown();
 });
 
@@ -301,6 +441,7 @@ test("registry round trip restores settled entries and stale running entries as 
     await first.manager.shutdown();
     const restored = harness({ registryFile }).manager;
     assert.equal(restored.get(snapshot.id)?.status, "done");
+    assert.equal(restored.get(snapshot.id)?.name, "test");
     assert.equal(restored.get(snapshot.id)?.restored, true);
     assert.equal(restored.get(snapshot.id)?.consumed, true);
     await restored.shutdown();
@@ -381,7 +522,7 @@ test("restored continuation rejects missing child session state", async () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("restore reapplies per-string registry limits", async () => {
+test("legacy registries remain viewable but continuation fails closed", async () => {
   const dir = mkdtempSync(join(tmpdir(), "subagents-string-limits-"));
   const registryFile = join(dir, "registry.json");
   try {
@@ -397,9 +538,8 @@ test("restore reapplies per-string registry limits", async () => {
     assert.equal(snapshot.title.length, 160);
     assert.equal(snapshot.task.length, 16 * 1024);
     assert.equal(snapshot.output.length, 16 * 1024);
-    await restored.manager.send(snapshot.id, "continue");
-    await restored.manager.wait([snapshot.id]);
-    assert.equal(restored.resourceOptions[0].appendSystemPrompt[0].length, 16 * 1024);
+    await assert.rejects(restored.manager.send(snapshot.id, "continue"), /legacy subagent.*sandbox snapshot/i);
+    assert.equal(restored.resourceOptions.length, 0);
     await restored.manager.shutdown();
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

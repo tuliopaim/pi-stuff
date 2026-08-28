@@ -374,7 +374,7 @@ function spawnCaptureManager(spawned: any[]) {
     },
     subscribeTo: () => () => {},
     subscribe: () => () => {},
-    wait: async () => [],
+    wait: async () => [], waitUntilPaused: async () => ({ status: "done" }),
   } as any;
 }
 

@@ -24,7 +24,7 @@ function usageLine(details: DelegationDetails) {
 
 /** Mirrors the tool-execution shell: pending while running, success/error once settled. */
 function statusBg(status: DelegationStatus, theme: Theme) {
-  if (status === "running") return (text: string) => theme.bg("toolPendingBg", text);
+  if (status === "running" || status === "waiting") return (text: string) => theme.bg("toolPendingBg", text);
   if (status === "done") return (text: string) => theme.bg("toolSuccessBg", text);
   return (text: string) => theme.bg("toolErrorBg", text);
 }
@@ -50,7 +50,7 @@ export function renderDelegationResult(details: DelegationDetails | undefined, e
   if (!details) return new Text(theme.fg("muted", "(no delegation details)"), 0, 0);
   const icon = details.status === "done"
     ? theme.fg("success", "✓")
-    : details.status === "running"
+    : details.status === "running" || details.status === "waiting"
       ? theme.fg("warning", "⏳")
       : theme.fg("error", "✗");
   const label = details.status === "done" ? "completed" : details.status === "running" ? "running" : details.status;

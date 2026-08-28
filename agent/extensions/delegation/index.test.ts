@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -52,13 +52,116 @@ test("registers existing and persistent subagent APIs", () => {
   const registered = withAgentEnabled(registrationHarness);
   assert.deepEqual(registered.tools, [
     "scout", "review", "commit", "agent",
-    "subagent_spawn", "subagent_wait", "subagent_cancel", "subagent_check", "subagent_list",
+    "subagent_spawn", "subagent_profiles", "subagent_message", "subagent_wait", "subagent_cancel", "subagent_check", "subagent_list",
   ]);
   assert.deepEqual(registered.commands, ["commit", "subagents", "btw", "subagent-preset"]);
-  assert.deepEqual(registered.renderers, ["commit-result", "subagent-result"]);
+  assert.deepEqual(registered.renderers, ["commit-result", "subagent-result", "subagent-question"]);
   assert.deepEqual(registered.entries, ["btw-result"]);
   assert.ok(registered.events.includes("session_start"));
   assert.ok(registered.events.includes("session_shutdown"));
+});
+
+test("background results use markdown rendering with the standard output margin", () => {
+  const renderers = new Map<string, any>();
+  registerDelegation({
+    registerTool() {}, registerCommand() {}, registerEntryRenderer() {}, on() {},
+    registerMessageRenderer(name: string, renderer: any) { renderers.set(name, renderer); },
+  } as any);
+  const component = renderers.get("subagent-result")(
+    { content: "## Findings\n\n- **One** result" },
+    { expanded: false, outputPad: 3 },
+    {},
+  );
+  assert.equal(component.constructor.name, "Box");
+  assert.equal(component.paddingX, 1);
+  assert.equal(component.children[0].constructor.name, "Markdown");
+});
+
+test("subagent_message resolves a stable name and uses the manager send path", async () => {
+  const tools = new Map<string, any>();
+  const events = new Map<string, any>();
+  const sent: Array<[string, string]> = [];
+  const snapshot: any = { id: "sa_one", name: "researcher", origin: "generic", status: "running" };
+  const manager: any = {
+    list: () => [snapshot], resolve: (ref: string) => ref === snapshot.name ? snapshot : undefined,
+    send: async (id: string, message: string) => { sent.push([id, message]); }, subscribe: () => () => {}, shutdown: async () => {},
+  };
+  registerDelegation({
+    registerTool(tool: any) { tools.set(tool.name, tool); }, registerCommand() {}, registerMessageRenderer() {}, registerEntryRenderer() {},
+    on(name: string, handler: any) { events.set(name, handler); },
+  } as any, () => manager);
+  events.get("session_start")({}, { hasUI: false, ui: { setStatus() {} }, sessionManager: { getSessionId: () => "parent" } });
+  const result = await tools.get("subagent_message").execute("call", { name: "researcher", message: "check primary sources" });
+  assert.deepEqual(sent, [["sa_one", "check primary sources"]]);
+  assert.match(result.content[0].text, /researcher/);
+});
+
+test("a waiting child question is announced to the parent once per runtime", () => {
+  const events = new Map<string, any>();
+  const messages: any[] = [];
+  let announce!: (snapshot: any) => void;
+  const snapshot: any = {
+    id: "sa_one", name: "researcher", title: "Research", origin: "generic", status: "waiting",
+    question: { text: "Which branch?", askedAt: Date.now() }, consumed: false,
+  };
+  const manager: any = { list: () => [snapshot], subscribe: () => () => {}, shutdown: async () => {} };
+  registerDelegation({
+    registerTool() {}, registerCommand() {}, registerMessageRenderer() {}, registerEntryRenderer() {},
+    on(name: string, handler: any) { events.set(name, handler); }, sendMessage(message: any, options: any) { messages.push([message, options]); },
+  } as any, (_ctx: any, _id: string, _settled: any, onQuestion: any) => { announce = onQuestion; return manager; });
+  events.get("session_start")({}, {
+    hasUI: false, isIdle: () => false, ui: { setStatus() {} }, sessionManager: { getSessionId: () => "parent" },
+  });
+  announce(snapshot);
+  announce(snapshot);
+  assert.equal(messages.length, 1);
+  assert.match(messages[0][0].content, /subagent_message\(\{ name: "researcher", message: "\.\.\." \}\)/);
+  assert.deepEqual(messages[0][1], { deliverAs: "steer", triggerTurn: true });
+});
+
+test("subagent_spawn merges a declarative profile with explicit spawn arguments", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-profile-spawn-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const tools = new Map<string, any>();
+  const events = new Map<string, any>();
+  const spawned: any[] = [];
+  try {
+    writeFileSync(join(dir, "settings.json"), JSON.stringify({ subagents: { preset: "test", presets: { test: {
+      enableAgentTool: true,
+      routes: [{ id: "recon", model: "test/model", thinking: "low", guidance: "research" }],
+      roles: { agent: "recon" },
+    } } } }));
+    const agents = join(dir, "agents");
+    mkdirSync(agents, { recursive: true });
+    writeFileSync(join(agents, "researcher.md"), `---\nname: researcher\ndescription: Research\nroute: recon\nmutating: false\ntools: read, grep\nsession-mode: lineage-only\n---\nProfile prompt`);
+    process.env.PI_CODING_AGENT_DIR = dir;
+    setSubagentPreset(undefined);
+    const manager: any = {
+      list: () => [], subscribe: () => () => {}, shutdown: async () => {},
+      spawn: async (options: any) => { spawned.push(options); return { ...options, id: "sa_profile", status: "running" }; },
+    };
+    registerDelegation({
+      registerTool(tool: any) { tools.set(tool.name, tool); }, registerCommand() {}, registerMessageRenderer() {}, registerEntryRenderer() {},
+      on(name: string, handler: any) { events.set(name, handler); },
+    } as any, () => manager);
+    const cwd = process.cwd();
+    const ctx: any = {
+      cwd, isProjectTrusted: () => true, sessionManager: { getSessionFile: () => "/tmp/parent.jsonl" },
+    };
+    events.get("session_start")({}, { ...ctx, hasUI: false, ui: { setStatus() {} }, sessionManager: { ...ctx.sessionManager, getSessionId: () => "parent" } });
+    await tools.get("subagent_spawn").execute("call", { task: "find docs", agent: "researcher", name: "docs" }, undefined, undefined, ctx);
+    assert.equal(spawned[0].name, "docs");
+    assert.equal(spawned[0].model, "test/model");
+    assert.equal(spawned[0].mutating, false);
+    assert.equal(spawned[0].sessionMode, "lineage-only");
+    assert.equal(spawned[0].config.prompt, "Profile prompt");
+    assert.equal(spawned[0].config.tools, "read,grep");
+  } finally {
+    setSubagentPreset(undefined);
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("model guidance scales delegation by independent workstreams", () => {
@@ -156,7 +259,7 @@ test("/commit keeps progress, Escape cancellation, and custom result delivery", 
   const manager: any = {
     list: () => [snapshot], get: () => snapshot, subscribe: () => () => {}, subscribeTo: (_id: string, listener: () => void) => { listeners.add(listener); return () => listeners.delete(listener); },
     spawn: async (options: any) => { options.signal?.addEventListener("abort", () => void manager.cancel([snapshot.id]), { once: true }); return snapshot; },
-    wait: async () => { await waiting; return [snapshot]; },
+    wait: async () => { await waiting; return [snapshot]; }, waitUntilPaused: async () => { await waiting; return snapshot; },
     cancel: async () => { snapshot.status = "cancelled"; snapshot.error = "Cancelled"; snapshot.settledAt = Date.now(); for (const listener of listeners) listener(); finishWait(); return [snapshot]; },
     shutdown: async () => {}, consume: () => {},
   };
@@ -338,9 +441,10 @@ test("/btw persists a TUI entry without injecting the answer into model context"
 test("model-facing management tools reject TUI-only /btw sessions", async () => {
   const tools = new Map<string, any>();
   const events = new Map<string, any>();
-  const btw: any = { id: "btw_secret", origin: "btw", status: "done" };
+  const btw: any = { id: "btw_secret", name: "btw", origin: "btw", status: "done" };
   const manager: any = {
     list: () => [btw], get: (id: string) => id === btw.id ? btw : undefined, subscribe: () => () => {}, shutdown: async () => {},
+    resolve: (ref: string) => ref === btw.id || ref === btw.name ? btw : undefined,
     wait: async () => [btw], cancel: async () => [btw],
   };
   registerDelegation({
@@ -351,6 +455,7 @@ test("model-facing management tools reject TUI-only /btw sessions", async () => 
   await assert.rejects(tools.get("subagent_wait").execute("call", { ids: [btw.id] }), /only available through the TUI/);
   await assert.rejects(tools.get("subagent_cancel").execute("call", { ids: [btw.id] }), /only available through the TUI/);
   await assert.rejects(tools.get("subagent_check").execute("call", { id: btw.id }), /Unknown subagent/);
+  await assert.rejects(tools.get("subagent_message").execute("call", { name: btw.name, message: "continue" }), /Unknown subagent name/);
   const listed = await tools.get("subagent_list").execute("call", {});
   assert.equal(listed.content[0].text, "No subagents.");
 });
@@ -359,10 +464,11 @@ test("subagent_wait caps combined output across many agents", async () => {
   const tools = new Map<string, any>();
   const events = new Map<string, any>();
   const snapshots = Array.from({ length: 8 }, (_, index) => ({
-    id: `sa_${index}`, origin: "generic", title: `agent ${index}`, status: "done", output: "x".repeat(16 * 1024), consumed: false,
+    id: `sa_${index}`, name: `agent-${index}`, origin: "generic", title: `agent ${index}`, status: "done", output: "x".repeat(16 * 1024), consumed: false,
   }));
   const manager: any = {
     list: () => snapshots, get: (id: string) => snapshots.find((entry) => entry.id === id), subscribe: () => () => {}, shutdown: async () => {},
+    resolve: (ref: string) => snapshots.find((entry) => entry.id === ref || entry.name === ref),
     wait: async () => snapshots, consume: () => {},
   };
   registerDelegation({

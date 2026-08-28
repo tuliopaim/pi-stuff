@@ -10,9 +10,9 @@ const theme: any = {
 
 function snapshot(overrides: Partial<SubagentSnapshot> = {}): SubagentSnapshot {
   return {
-    id: "sa_visible", origin: "generic", title: "implementation", task: "build it", cwd: "/repo",
-    model: "openai-codex/gpt-5.6-sol", thinking: "medium", status: "running", mutating: true,
-    createdAt: 1_000, output: "", liveText: "", liveThinking: "", activities: ["bash: npm test"], queued: [], transcript: [],
+    id: "sa_visible", name: "implementation", origin: "generic", title: "implementation", task: "build it", cwd: "/repo",
+    model: "openai-codex/gpt-5.6-sol", thinking: "medium", sessionMode: "standalone", status: "running", mutating: true,
+    createdAt: 1_000, lastActivityAt: 1_000, output: "", liveText: "", liveThinking: "", activities: ["bash: npm test"], queued: [], transcript: [],
     usage: { turns: 3, input: 43_000, output: 2_100, cacheRead: 80_000, cacheWrite: 0, cost: 0.1482, contextTokens: 51_000, contextWindow: 272_000 },
     consumed: false, ...overrides,
   };
@@ -45,4 +45,16 @@ test("wait progress uses the same operational summary", () => {
   assert.match(text, /■ implementation · sa_visible/);
   assert.match(text, /openai-codex\/gpt-5\.6-sol:medium/);
   assert.match(text, /bash: npm test/);
+});
+
+test("waiting and stalled children remain pending in monitor counts", () => {
+  const lines = renderSubagentMonitor([
+    snapshot({ id: "sa_wait", status: "waiting", question: { text: "Which branch?", askedAt: 2_000 } }),
+    snapshot({ id: "sa_stall", status: "stalled", lastActivityAt: 2_000 }),
+  ], 160, theme, 5_000);
+  const text = lines.join("\n");
+  assert.match(text, /1 waiting/);
+  assert.match(text, /1 stalled/);
+  assert.doesNotMatch(text, /failed/);
+  assert.match(text, /waiting for parent: Which branch\?/);
 });
