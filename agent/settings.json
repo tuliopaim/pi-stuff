@@ -9,7 +9,7 @@
     "openai-codex/gpt-5.6-terra:high",
     "opencode-go/deepseek-v4-flash:high",
     "opencode-go/kimi-k2.7-code:high",
-    "opencode-go/ox-alpha-free:high"
+    "opencode-go/glm-5.3-flash"
   ],
   "editorPaddingX": 2,
   "hideThinkingBlock": true,
@@ -61,21 +61,15 @@
           },
           {
             "id": "implement",
-            "model": "opencode-go/kimi-k2.7-code",
+            "model": "opencode-go/glm-5.3-flash",
             "thinking": "high",
             "guidance": "routine or clearly scoped implementation"
           },
           {
             "id": "integrate",
-            "model": "openai-codex/gpt-5.6-terra",
+            "model": "opencode-go/glm-5.3-flash",
             "thinking": "high",
             "guidance": "moderate-to-hard implementation, integration across modules, ambiguous behavior"
-          },
-          {
-            "id": "ox",
-            "model": "opencode-go/ox-alpha-free",
-            "thinking": "high",
-            "guidance": "long multi-step implementations, medium/large plan execution, cross-module refactors, or hard debugging where broad working-tree context pays off"
           },
           {
             "id": "hard",
@@ -106,19 +100,19 @@
           },
           {
             "id": "implement",
-            "model": "opencode-go/ox-alpha-free",
+            "model": "opencode-go/glm-5.3-flash",
             "thinking": "high",
             "guidance": "implementation work"
           },
           {
             "id": "review",
-            "model": "opencode-go/ox-alpha-free",
+            "model": "opencode-go/glm-5.3-flash",
             "thinking": "max",
             "guidance": "code review"
           },
           {
             "id": "deep",
-            "model": "opencode-go/ox-alpha-free",
+            "model": "opencode-go/glm-5.3-flash",
             "thinking": "max",
             "guidance": "planning or consequential final review"
           }
@@ -160,7 +154,7 @@
         "routes": [
           {
             "id": "recon",
-            "model": "github-copilot/gpt-5.4-mini",
+            "model": "github-copilot/gpt-5.6-luna",
             "thinking": "medium",
             "guidance": "reconnaissance/routine checks"
           },
