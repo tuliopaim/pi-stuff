@@ -1,21 +1,25 @@
 {
-  "lastChangelogVersion": "0.84.3",
+  "lastChangelogVersion": "0.85.1",
   "defaultProvider": "openai-codex",
   "defaultModel": "gpt-5.6-sol",
   "defaultThinkingLevel": "medium",
   "enabledModels": [
-    "openai-codex/gpt-5.6-luna:high",
+    "openai-codex/gpt-6-astra",
     "openai-codex/gpt-5.6-sol:medium",
-    "openai-codex/gpt-5.6-terra:high",
+    "openai-codex/gpt-5.6-luna:high",
     "opencode-go/deepseek-v4-flash:high",
     "opencode-go/kimi-k2.7-code:high",
     "opencode-go/glm-5.3-flash"
   ],
   "editorPaddingX": 2,
-  "hideThinkingBlock": true,
+  "hideThinkingBlock": false,
   "packages": [
     "git:github.com/code-yeongyu/pi-apply-patch",
-    "npm:@plannotator/pi-extension"
+    {
+      "source": "npm:@plannotator/pi-extension",
+      "skills": []
+    },
+    "git:github.com/DietrichGebert/ponytail"
   ],
   "skills": [
     "~/dotfiles/skills"
@@ -73,13 +77,13 @@
           },
           {
             "id": "hard",
-            "model": "openai-codex/gpt-5.6-sol",
+            "model": "openai-codex/gpt-6-astra",
             "thinking": "medium",
             "guidance": "difficult implementation, architecture-sensitive changes, or hard debugging"
           },
           {
             "id": "deep",
-            "model": "openai-codex/gpt-5.6-sol",
+            "model": "openai-codex/gpt-6-astra",
             "thinking": "high",
             "guidance": "consequential planning, adversarial review, security, or data-loss work"
           }
@@ -133,13 +137,13 @@
           },
           {
             "id": "implement",
-            "model": "openai-codex/gpt-5.6-terra",
+            "model": "openai-codex/gpt-5.6-sol",
             "thinking": "medium",
             "guidance": "implementation and integration"
           },
           {
             "id": "deep",
-            "model": "openai-codex/gpt-5.6-sol",
+            "model": "openai-codex/gpt-6-astra",
             "thinking": "high",
             "guidance": "planning or consequential final review"
           }
@@ -172,7 +176,7 @@
           },
           {
             "id": "deep",
-            "model": "github-copilot/gpt-5.6-sol",
+            "model": "openai-codex/gpt-6-astra",
             "thinking": "high",
             "guidance": "difficult planning or consequential review"
           }
