@@ -383,7 +383,7 @@ export function registerDelegatedTool(pi: ExtensionAPI, policy: DelegationPolicy
   pi.registerTool({
     name: policy.key,
     label: policy.name,
-    description: `${policy.description} Hard timeout: ${policy.timeoutMs / 1000}s.`,
+    description: `${policy.description} Stops after 5 minutes without activity; ${policy.timeoutMs / 60_000}-minute safety cap.`,
     promptSnippet: policy.snippet,
     promptGuidelines: [
       ...policy.guidelines,

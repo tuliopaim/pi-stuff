@@ -32,6 +32,7 @@ const LIVE_MAX_CHARS = 128 * 1024;
 const MAX_TRANSCRIPT_ITEMS = 512;
 const REGISTRY_MAX_BYTES = 4 * 1024 * 1024;
 const PERSISTED_STRING_MAX = 16 * 1024;
+const INACTIVITY_TIMEOUT_MS = 5 * 60_000;
 const STATUSES = new Set(["running", "waiting", "stalled", "done", "failed", "cancelled", "interrupted"]);
 
 interface PersistedConfig {
@@ -112,6 +113,7 @@ export interface SubagentManagerOptions {
   abortTimeoutMs?: number;
   onQuestion?: (snapshot: SubagentSnapshot) => void;
   stallAfterMs?: number;
+  inactivityTimeoutMs?: number;
 }
 
 function errorText(error: unknown) {
@@ -300,6 +302,7 @@ export class SubagentManager {
   private readonly abortTimeoutMs: number;
   private readonly onQuestion?: (snapshot: SubagentSnapshot) => void;
   private readonly stallAfterMs: number;
+  private readonly inactivityTimeoutMs: number;
   private watchdog?: ReturnType<typeof setInterval>;
 
   constructor(
@@ -324,9 +327,10 @@ export class SubagentManager {
     this.abortTimeoutMs = options.abortTimeoutMs ?? 5_000;
     this.onQuestion = options.onQuestion;
     this.stallAfterMs = Math.max(1, Math.min(options.stallAfterMs ?? 60_000, 60 * 60_000));
+    this.inactivityTimeoutMs = Math.max(this.stallAfterMs, options.inactivityTimeoutMs ?? INACTIVITY_TIMEOUT_MS);
     this.file = options.registryFile ?? path.join(getAgentDir(), "subagents", `${parentSessionId}.json`);
     this.restore();
-    this.watchdog = setInterval(() => this.refreshStatuses(Date.now()), Math.max(1_000, Math.min(10_000, this.stallAfterMs / 2)));
+    this.watchdog = setInterval(() => this.refreshStatuses(Date.now()), Math.max(1_000, Math.min(10_000, this.stallAfterMs / 2, this.inactivityTimeoutMs / 2)));
     this.watchdog.unref?.();
   }
 
@@ -436,9 +440,10 @@ export class SubagentManager {
     this.notify(snapshot.id);
     try {
       this.beginLifecycle(entry, options.signal);
+      const setupTimeoutMs = Math.min(options.config.timeoutMs, this.inactivityTimeoutMs);
       const setup = this.open(entry, false).pipe(Effect.timeoutOrElse({
-        duration: options.config.timeoutMs,
-        orElse: () => Effect.fail(new Error(`Timed out after ${options.config.timeoutMs / 60_000} minutes`)),
+        duration: setupTimeoutMs,
+        orElse: () => Effect.fail(new Error(`Timed out after ${setupTimeoutMs / 60_000} minutes without activity during setup`)),
       }), Effect.as(snapshot));
       entry.setupFiber = Effect.runSync(Effect.forkIn(setup, entry.scope));
       const interruptSetup = () => entry.setupFiber?.interruptUnsafe();
@@ -667,7 +672,11 @@ export class SubagentManager {
   refreshStatuses(now = Date.now()) {
     for (const entry of this.entries.values()) {
       const snapshot = entry.snapshot;
-      if (entry.active && snapshot.status === "running" && now - snapshot.lastActivityAt > this.stallAfterMs) {
+      if (!entry.active || (snapshot.status !== "running" && snapshot.status !== "stalled")) continue;
+      const inactiveMs = now - snapshot.lastActivityAt;
+      if (inactiveMs >= this.inactivityTimeoutMs) {
+        entry.controller?.abort(new Error(`Timed out after ${this.inactivityTimeoutMs / 60_000} minutes without activity`));
+      } else if (snapshot.status === "running" && inactiveMs > this.stallAfterMs) {
         snapshot.status = "stalled";
         this.notify(snapshot.id);
       }
@@ -769,9 +778,10 @@ export class SubagentManager {
       this.beginLifecycle(entry);
       if (!entry.session) {
         if (entry.scope.state._tag === "Closed") entry.scope = Scope.makeUnsafe("parallel");
+        const setupTimeoutMs = Math.min(entry.config.timeoutMs, this.inactivityTimeoutMs);
         const setup = this.open(entry, true).pipe(Effect.timeoutOrElse({
-          duration: entry.config.timeoutMs,
-          orElse: () => Effect.fail(new Error(`Timed out after ${entry.config.timeoutMs / 60_000} minutes`)),
+          duration: setupTimeoutMs,
+          orElse: () => Effect.fail(new Error(`Timed out after ${setupTimeoutMs / 60_000} minutes without activity during setup`)),
         }));
         entry.setupFiber = Effect.runSync(Effect.forkIn(setup, entry.scope));
         const interruptSetup = () => entry.setupFiber?.interruptUnsafe();

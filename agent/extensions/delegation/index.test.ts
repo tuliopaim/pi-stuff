@@ -169,7 +169,8 @@ test("model guidance scales delegation by independent workstreams", () => {
   withAgentEnabled(() => registerDelegation({
       registerTool(tool: any) { tools.set(tool.name, tool); }, registerCommand() {}, registerMessageRenderer() {}, registerEntryRenderer() {}, on() {},
     } as any));
-  assert.match(tools.get("scout").promptGuidelines.join("\n"), /Use one scout by default/);
+  assert.match(tools.get("scout").promptGuidelines.join("\n"), /Default to direct inspection/);
+  assert.match(tools.get("scout").promptGuidelines.join("\n"), /more than 2-3 files/);
   assert.match(tools.get("agent").promptGuidelines.join("\n"), /default to zero for clear local work/);
   assert.match(tools.get("agent").promptGuidelines.join("\n"), /Do not split connected implementation/);
   assert.match(tools.get("subagent_spawn").promptGuidelines.join("\n"), /Treat four as a hard ceiling, not a target/);
@@ -179,6 +180,7 @@ test("model guidance scales delegation by independent workstreams", () => {
   assert.match(workflow, /do not replace it with direct `agent`/);
 
   const settings = JSON.parse(readFileSync(join(process.cwd(), "settings.json"), "utf8"));
+  assert.ok(Object.values(settings.subagents.presets).every((preset: any) => preset.enableAgentTool === true));
   assert.ok(settings.subagents.presets.personal.routes.some((route: any) =>
     route.model === "openai-codex/gpt-5.6-luna" && route.thinking === "high"));
   assert.ok(settings.subagents.presets.copilot.routes.some((route: any) =>

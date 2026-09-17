@@ -5,7 +5,7 @@ import type { SubagentSessionMode } from "./domain.ts";
 
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const SESSION_MODES = new Set<SubagentSessionMode>(["standalone", "lineage-only", "fork"]);
-const MAX_TIMEOUT_MS = 24 * 60 * 60_000;
+const MAX_TIMEOUT_MS = 30 * 60_000;
 
 export interface SubagentProfile {
   name: string;
@@ -47,7 +47,7 @@ function duration(value: unknown) {
   if (!match) throw new Error("timeout must use 30s, 10m, or 1h syntax.");
   const multiplier = match[2] === "s" ? 1_000 : match[2] === "m" ? 60_000 : 60 * 60_000;
   const milliseconds = Number(match[1]) * multiplier;
-  if (milliseconds < 1_000 || milliseconds > MAX_TIMEOUT_MS) throw new Error("timeout must be between 1s and 24h.");
+  if (milliseconds < 1_000 || milliseconds > MAX_TIMEOUT_MS) throw new Error("timeout must be between 1s and 30m.");
   return milliseconds;
 }
 

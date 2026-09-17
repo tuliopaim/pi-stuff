@@ -41,12 +41,12 @@ const SCOUT: DelegationPolicy = {
   model: "opencode-go/deepseek-v4-flash",
   thinking: "medium",
   mutating: false,
-  timeoutMs: 5 * 60_000,
+  timeoutMs: 30 * 60_000,
   tools: "read,grep,find,ls",
   description: "Delegate focused, read-only codebase reconnaissance to a cheaper model.",
   snippet: "Delegate focused codebase reconnaissance to a cheaper read-only model",
   guidelines: [
-    "Use scout before broad exploration when locating the answer likely requires more than 2-3 files.",
+    "Default to direct inspection. Use scout only for a narrow reconnaissance question that would otherwise require exploring more than 2-3 files.",
     "Do not use scout for work answerable with one or two direct reads, after equivalent reconnaissance is already done, for implementation, or for decisions requiring your own judgment.",
     "Use one scout by default. Use a second only when two reconnaissance questions are independent and combining them would make either scout broad or duplicative.",
     "After scout returns, read only its recommended targets and verify only claims that affect edits or important decisions.",
@@ -87,7 +87,7 @@ const REVIEW: DelegationPolicy = {
   model: "openai-codex/gpt-5.6-sol",
   thinking: "high",
   mutating: false,
-  timeoutMs: 15 * 60_000,
+  timeoutMs: 30 * 60_000,
   tools: "read,grep,find,ls",
   description: "Delegate focused, read-only code review to a high-reasoning model.",
   snippet: "Delegate focused code review to a high-reasoning model",
@@ -136,7 +136,7 @@ const COMMIT: DelegationPolicy = {
   model: "opencode-go/deepseek-v4-flash",
   thinking: "medium",
   mutating: true,
-  timeoutMs: 15 * 60_000,
+  timeoutMs: 30 * 60_000,
   tools: "read,grep,find,ls,bash",
   description: "Delegate completed-work analysis and intentional git commits to a specialized model.",
   snippet: "Delegate git commit creation to a specialized child",
@@ -589,7 +589,7 @@ export default function (
       const snapshot = await getManager().spawn({
         origin: "btw", name: "btw", title: task.split(/\s+/).slice(0, 8).join(" "), task, cwd: ctx.cwd,
         model, thinking: pi.getThinkingLevel(), sessionMode: "standalone", mutating: false,
-        config: { name: "By the way", prompt: "Answer the user's one-off side question concisely. Do not modify files.", timeoutMs: 15 * 60_000, tools: "read,grep,find,ls", inheritResources: false },
+        config: { name: "By the way", prompt: "Answer the user's one-off side question concisely. Do not modify files.", timeoutMs: 30 * 60_000, tools: "read,grep,find,ls", inheritResources: false },
       });
       await showTakeover(ctx, getManager(), snapshot.id);
     },

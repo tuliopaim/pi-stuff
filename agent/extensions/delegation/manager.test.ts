@@ -53,7 +53,7 @@ class FakeSession {
   getToolDefinition() { return undefined; }
 }
 
-function harness(options: { pending?: boolean; registryFile?: string; parentSessionId?: string; onSettled?: (snapshot: any) => void; stuckAbort?: boolean; failBind?: boolean; resourceGate?: Promise<void>; preflightGate?: Promise<void>; createFail?: boolean; stallAfterMs?: number; extensionPaths?: string[]; skillPaths?: string[]; contextFiles?: Array<{ path: string; content: string }> } = {}) {
+function harness(options: { pending?: boolean; registryFile?: string; parentSessionId?: string; onSettled?: (snapshot: any) => void; stuckAbort?: boolean; failBind?: boolean; resourceGate?: Promise<void>; preflightGate?: Promise<void>; createFail?: boolean; stallAfterMs?: number; inactivityTimeoutMs?: number; extensionPaths?: string[]; skillPaths?: string[]; contextFiles?: Array<{ path: string; content: string }> } = {}) {
   const sessions: FakeSession[] = [];
   const sessionOptions: any[] = [];
   const sessionManagerOptions: any[] = [];
@@ -86,7 +86,7 @@ function harness(options: { pending?: boolean; registryFile?: string; parentSess
       session.preflightGate = options.preflightGate;
       sessions.push(session);
       return { session } as any;
-    }, abortTimeoutMs: 10, stallAfterMs: options.stallAfterMs,
+    }, abortTimeoutMs: 10, stallAfterMs: options.stallAfterMs, inactivityTimeoutMs: options.inactivityTimeoutMs,
   });
   return { manager, sessions, sessionOptions, sessionManagerOptions, resourceOptions };
 }
@@ -300,6 +300,20 @@ test("running children become stalled and recover on the next child event", asyn
   sessions[0].emitEvent({ type: "queue_update", steering: [], followUp: [] });
   assert.equal(snapshot.status, "running");
   await manager.cancel([snapshot.id]);
+  await manager.shutdown();
+});
+
+test("active children time out only after five minutes without events", async () => {
+  const { manager, sessions } = harness({ pending: true, stallAfterMs: 10, inactivityTimeoutMs: 20 });
+  const snapshot = await manager.spawn(spawnOptions());
+  manager.refreshStatuses(snapshot.lastActivityAt + 19);
+  assert.equal(snapshot.status, "stalled");
+  sessions[0].emitEvent({ type: "queue_update", steering: [], followUp: [] });
+  const lastActivityAt = snapshot.lastActivityAt;
+  manager.refreshStatuses(lastActivityAt + 20);
+  await manager.wait([snapshot.id]);
+  assert.equal(snapshot.status, "failed");
+  assert.match(snapshot.error ?? "", /without activity/);
   await manager.shutdown();
 });
 

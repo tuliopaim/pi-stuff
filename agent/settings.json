@@ -7,8 +7,7 @@
     "openai-codex/gpt-6-astra",
     "openai-codex/gpt-5.6-sol:medium",
     "openai-codex/gpt-5.6-luna:high",
-    "opencode-go/deepseek-v4-flash:high",
-    "opencode-go/kimi-k2.7-code:high",
+    "opencode-go/deepseek-v4.1-flash:high",
     "opencode-go/glm-5.3-flash"
   ],
   "editorPaddingX": 2,
@@ -44,10 +43,11 @@
     },
     "presets": {
       "personal": {
+        "enableAgentTool": true,
         "routes": [
           {
             "id": "recon",
-            "model": "opencode-go/deepseek-v4-flash",
+            "model": "openai-codex/gpt-5.6-luna",
             "thinking": "high",
             "guidance": "reconnaissance/routine checks"
           },
@@ -65,13 +65,13 @@
           },
           {
             "id": "implement",
-            "model": "opencode-go/glm-5.3-flash",
+            "model": "opencode-go/deepseek-v4.1-flash",
             "thinking": "high",
             "guidance": "routine or clearly scoped implementation"
           },
           {
             "id": "integrate",
-            "model": "opencode-go/glm-5.3-flash",
+            "model": "openai-codex/gpt-5.6-sol",
             "thinking": "high",
             "guidance": "moderate-to-hard implementation, integration across modules, ambiguous behavior"
           },
@@ -95,6 +95,7 @@
         }
       },
       "opencode-go": {
+        "enableAgentTool": true,
         "routes": [
           {
             "id": "recon",
@@ -110,13 +111,13 @@
           },
           {
             "id": "review",
-            "model": "opencode-go/glm-5.3-flash",
+            "model": "opencode-go/deepseek-v4.1-flash",
             "thinking": "max",
             "guidance": "code review"
           },
           {
             "id": "deep",
-            "model": "opencode-go/glm-5.3-flash",
+            "model": "opencode-go/deepseek-v4.1-flash",
             "thinking": "max",
             "guidance": "planning or consequential final review"
           }
@@ -128,6 +129,7 @@
         }
       },
       "openai": {
+        "enableAgentTool": true,
         "routes": [
           {
             "id": "recon",
@@ -155,6 +157,7 @@
         }
       },
       "copilot": {
+        "enableAgentTool": true,
         "routes": [
           {
             "id": "recon",
