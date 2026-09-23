@@ -1,12 +1,12 @@
 {
-  "lastChangelogVersion": "0.85.1",
+  "lastChangelogVersion": "0.87.1",
   "defaultProvider": "openai-codex",
-  "defaultModel": "gpt-5.6-sol",
+  "defaultModel": "gpt-6-sol",
   "defaultThinkingLevel": "medium",
   "enabledModels": [
     "openai-codex/gpt-6-astra",
-    "openai-codex/gpt-5.6-sol:medium",
-    "openai-codex/gpt-5.6-luna:high",
+    "openai-codex/gpt-6-sol:medium",
+    "openai-codex/gpt-6-luna:high",
     "opencode-go/deepseek-v4.1-flash:high",
     "opencode-go/glm-5.3-flash"
   ],
@@ -47,19 +47,19 @@
         "routes": [
           {
             "id": "recon",
-            "model": "openai-codex/gpt-5.6-luna",
+            "model": "openai-codex/gpt-6-luna",
             "thinking": "high",
             "guidance": "reconnaissance/routine checks"
           },
           {
             "id": "fast",
-            "model": "openai-codex/gpt-5.6-luna",
+            "model": "openai-codex/gpt-6-luna",
             "thinking": "high",
             "guidance": "explicitly requested fast parallel reconnaissance or routine work"
           },
           {
             "id": "mechanical",
-            "model": "openai-codex/gpt-5.6-luna",
+            "model": "openai-codex/gpt-6-luna",
             "thinking": "medium",
             "guidance": "commit grouping, formatting, and other mechanical delegated work"
           },
@@ -71,7 +71,7 @@
           },
           {
             "id": "integrate",
-            "model": "openai-codex/gpt-5.6-sol",
+            "model": "openai-codex/gpt-6-sol",
             "thinking": "high",
             "guidance": "moderate-to-hard implementation, integration across modules, ambiguous behavior"
           },
@@ -133,13 +133,13 @@
         "routes": [
           {
             "id": "recon",
-            "model": "openai-codex/gpt-5.6-luna",
+            "model": "openai-codex/gpt-6-luna",
             "thinking": "low",
             "guidance": "reconnaissance/routine checks"
           },
           {
             "id": "implement",
-            "model": "openai-codex/gpt-5.6-sol",
+            "model": "openai-codex/gpt-6-sol",
             "thinking": "medium",
             "guidance": "implementation and integration"
           },
@@ -161,19 +161,19 @@
         "routes": [
           {
             "id": "recon",
-            "model": "github-copilot/gpt-5.6-luna",
+            "model": "github-copilot/gpt-6-luna",
             "thinking": "medium",
             "guidance": "reconnaissance/routine checks"
           },
           {
             "id": "fast",
-            "model": "github-copilot/gpt-5.6-luna",
+            "model": "github-copilot/gpt-6-luna",
             "thinking": "high",
             "guidance": "explicitly requested fast parallel reconnaissance or routine work"
           },
           {
             "id": "implement",
-            "model": "github-copilot/gpt-5.6-terra",
+            "model": "github-copilot/gpt-6-luna",
             "thinking": "medium",
             "guidance": "implementation and integration"
           },
