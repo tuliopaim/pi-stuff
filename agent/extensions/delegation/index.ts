@@ -478,11 +478,20 @@ export default function (
         throw new Error(`Unknown subagent name "${params.name}".${names.length ? ` Known names: ${names.join(", ")}.` : ""}`);
       }
       if (!params.message.trim()) throw new Error("Message must not be empty.");
+      const question = snapshot.status === "waiting" ? snapshot.question?.text : undefined;
       await manager.send(snapshot.id, params.message);
       return {
         content: [{ type: "text", text: `Message sent to ${snapshot.name} (${snapshot.id}).` }],
-        details: { id: snapshot.id, name: snapshot.name, status: snapshot.status, sessionMode: snapshot.sessionMode },
+        details: { id: snapshot.id, name: snapshot.name, question, message: params.message, status: snapshot.status, sessionMode: snapshot.sessionMode },
       };
+    },
+    renderResult(result, _options, theme) {
+      const details = result.details as { name: string; question?: string; message: string } | undefined;
+      if (!details) return undefined;
+      const text = details.question
+        ? `Question from ${details.name}:\n${details.question}\n\nAnswer:\n${details.message}`
+        : `Message to ${details.name}:\n${details.message}`;
+      return new Text(theme.fg("toolOutput", text), 0, 0);
     },
   });
 

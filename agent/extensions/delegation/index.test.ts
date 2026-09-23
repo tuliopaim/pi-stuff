@@ -81,19 +81,27 @@ test("subagent_message resolves a stable name and uses the manager send path", a
   const tools = new Map<string, any>();
   const events = new Map<string, any>();
   const sent: Array<[string, string]> = [];
-  const snapshot: any = { id: "sa_one", name: "researcher", origin: "generic", status: "running" };
+  const snapshot: any = { id: "sa_one", name: "researcher", origin: "generic", status: "waiting", question: { text: "Which branch?", askedAt: Date.now() } };
   const manager: any = {
     list: () => [snapshot], resolve: (ref: string) => ref === snapshot.name ? snapshot : undefined,
-    send: async (id: string, message: string) => { sent.push([id, message]); }, subscribe: () => () => {}, shutdown: async () => {},
+    send: async (id: string, message: string) => { sent.push([id, message]); snapshot.question = undefined; snapshot.status = "running"; }, subscribe: () => () => {}, shutdown: async () => {},
   };
   registerDelegation({
     registerTool(tool: any) { tools.set(tool.name, tool); }, registerCommand() {}, registerMessageRenderer() {}, registerEntryRenderer() {},
-    on(name: string, handler: any) { events.set(name, handler); },
+    on(name: string, handler: any) { events.set(name, handler); }, sendMessage() {},
   } as any, () => manager);
   events.get("session_start")({}, { hasUI: false, ui: { setStatus() {} }, sessionManager: { getSessionId: () => "parent" } });
   const result = await tools.get("subagent_message").execute("call", { name: "researcher", message: "check primary sources" });
   assert.deepEqual(sent, [["sa_one", "check primary sources"]]);
   assert.match(result.content[0].text, /researcher/);
+  assert.equal(result.details.question, "Which branch?");
+  const theme: any = { fg: (_color: string, text: string) => text };
+  const rendered = tools.get("subagent_message").renderResult(result, { expanded: false }, theme).render(80).map((line: string) => line.trimEnd()).join("\n");
+  assert.match(rendered, /Question from researcher:\nWhich branch\?/);
+  assert.match(rendered, /Answer:\ncheck primary sources/);
+  const guidance = await tools.get("subagent_message").execute("call", { name: "researcher", message: "keep going" });
+  assert.equal(guidance.details.question, undefined);
+  assert.match(tools.get("subagent_message").renderResult(guidance, { expanded: false }, theme).render(80).map((line: string) => line.trimEnd()).join("\n"), /Message to researcher:\nkeep going/);
 });
 
 test("a waiting child question is announced to the parent once per runtime", () => {
