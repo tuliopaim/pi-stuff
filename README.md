@@ -132,15 +132,14 @@ It updates during generation and shows:
 
 ## Multi-agent workflows
 
-Generic agents and workflows are dormant by default. Enable them for one task with:
+Generic agents and workflows are dormant by default. Enable agents for one task with:
 
 ```text
 /delegate Add organization-level API tokens
 ```
 
-`/delegate` is the umbrella command: Pi chooses whether the task needs one agent,
-several persistent subagents, or a workflow. To explicitly require a model-authored
-workflow, use:
+`/delegate` lets the parent agent choose how to invoke and coordinate agents directly.
+It does not enable workflows. To explicitly require a model-authored workflow, use:
 
 ```text
 /workflow Scout this repository with five Luna agents

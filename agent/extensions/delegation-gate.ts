@@ -23,8 +23,9 @@ function explicitlyRequestsWorkflow(text: string) {
 export default function delegationGate(pi: ExtensionAPI) {
   let armed = false;
   const disable = () => pi.setActiveTools(pi.getActiveTools().filter((name) => !DELEGATION_TOOLS.has(name)));
-  const enable = () => {
-    pi.setActiveTools([...new Set([...pi.getActiveTools(), ...DELEGATION_TOOLS])]);
+  const enable = (includeWorkflow: boolean) => {
+    pi.setActiveTools([...new Set([...pi.getActiveTools(), ...DELEGATION_TOOLS])]
+      .filter((name) => includeWorkflow || name !== "workflow"));
     armed = true;
   };
 
@@ -46,12 +47,12 @@ export default function delegationGate(pi: ExtensionAPI) {
       return { action: "handled" };
     }
     if (naturalWorkflow && !isDelegate && !isWorkflow) {
-      enable();
+      enable(true);
       // Preserve the user's explicit request while making the named tool available.
       return;
     }
     if (isWorkflow) {
-      enable();
+      enable(true);
       // Let Pi expand the workflow prompt template after its tool is available.
       return { action: "continue" };
     }
@@ -60,7 +61,7 @@ export default function delegationGate(pi: ExtensionAPI) {
       || (ctx.hasUI ? (await ctx.ui.input("Delegate", "Task…"))?.trim() : undefined);
     if (!task) return { action: "handled" };
 
-    enable();
+    enable(false);
     return {
       action: "transform",
       text: `Use delegation tools as appropriate to complete this task:\n\n${task}`,

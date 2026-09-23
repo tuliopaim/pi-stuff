@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import delegationGate from "../agent/extensions/delegation-gate.ts";
 
-test("/delegate enables delegation tools for one run", async () => {
+test("/delegate enables agents without workflows for one run", async () => {
   let active = ["read", "scout", "agent", "workflow"];
   const events = new Map<string, (...args: any[]) => any>();
   const pi = {
@@ -22,7 +22,7 @@ test("/delegate enables delegation tools for one run", async () => {
   assert.match(result.text, /fix the bug/);
   assert.ok(active.includes("agent"));
   assert.ok(active.includes("subagent_spawn"));
-  assert.ok(active.includes("workflow"));
+  assert.ok(!active.includes("workflow"));
 
   events.get("agent_settled")!();
   assert.deepEqual(active, ["read", "scout"]);
