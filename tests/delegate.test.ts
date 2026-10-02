@@ -13,7 +13,7 @@ test("/delegate enables agents without workflows for one run", async () => {
 
   delegationGate(pi);
   events.get("session_start")!();
-  assert.deepEqual(active, ["read", "scout"]);
+  assert.deepEqual(active, ["read", "scout", "agent"]);
 
   const result = await events.get("input")!(
     { text: "/delegate fix the bug", source: "interactive" },
@@ -21,11 +21,11 @@ test("/delegate enables agents without workflows for one run", async () => {
   );
   assert.match(result.text, /fix the bug/);
   assert.ok(active.includes("agent"));
-  assert.ok(active.includes("subagent_spawn"));
+  assert.ok(!active.includes("subagent_spawn"));
   assert.ok(!active.includes("workflow"));
 
   events.get("agent_settled")!();
-  assert.deepEqual(active, ["read", "scout"]);
+  assert.deepEqual(active, ["read", "scout", "agent"]);
 });
 
 test("/workflow enables workflow tools before prompt expansion", async () => {
@@ -50,7 +50,7 @@ test("/workflow enables workflow tools before prompt expansion", async () => {
   assert.ok(active.includes("workflow"));
 
   events.get("agent_settled")!();
-  assert.deepEqual(active, ["read", "scout"]);
+  assert.deepEqual(active, ["read", "scout", "agent"]);
 });
 
 test("an explicit plain-language workflow request enables workflow tools", async () => {
@@ -93,5 +93,5 @@ test("negative workflow wording does not arm delegation", async () => {
   );
 
   assert.equal(result, undefined);
-  assert.deepEqual(active, ["read", "scout"]);
+  assert.deepEqual(active, ["read", "scout", "agent"]);
 });

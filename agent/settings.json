@@ -1,11 +1,11 @@
 {
-  "lastChangelogVersion": "0.87.1",
+  "lastChangelogVersion": "1.0.0",
   "defaultProvider": "openai-codex",
-  "defaultModel": "gpt-6-sol",
+  "defaultModel": "gpt-6.1-sol",
   "defaultThinkingLevel": "medium",
   "enabledModels": [
     "openai-codex/gpt-6-astra",
-    "openai-codex/gpt-6-sol:medium",
+    "openai-codex/gpt-6.1-sol:medium",
     "openai-codex/gpt-6-luna:high",
     "opencode-go/deepseek-v4.1-flash:high",
     "opencode-go/glm-5.3-flash"
@@ -29,169 +29,6 @@
   "prompts": [
     "~/dotfiles/pi/agent/prompts"
   ],
-  "subagents": {
-    "preset": "personal",
-    "shared": {
-      "roleSkills": {
-        "review": [
-          "*"
-        ],
-        "commit": [
-          "~/dotfiles/skills/commit-work"
-        ]
-      }
-    },
-    "presets": {
-      "personal": {
-        "enableAgentTool": true,
-        "routes": [
-          {
-            "id": "recon",
-            "model": "openai-codex/gpt-6-luna",
-            "thinking": "high",
-            "guidance": "reconnaissance/routine checks"
-          },
-          {
-            "id": "fast",
-            "model": "openai-codex/gpt-6-luna",
-            "thinking": "high",
-            "guidance": "explicitly requested fast parallel reconnaissance or routine work"
-          },
-          {
-            "id": "mechanical",
-            "model": "openai-codex/gpt-6-luna",
-            "thinking": "medium",
-            "guidance": "commit grouping, formatting, and other mechanical delegated work"
-          },
-          {
-            "id": "implement",
-            "model": "opencode-go/deepseek-v4.1-flash",
-            "thinking": "high",
-            "guidance": "routine or clearly scoped implementation"
-          },
-          {
-            "id": "integrate",
-            "model": "openai-codex/gpt-6-sol",
-            "thinking": "high",
-            "guidance": "moderate-to-hard implementation, integration across modules, ambiguous behavior"
-          },
-          {
-            "id": "hard",
-            "model": "openai-codex/gpt-6-astra",
-            "thinking": "medium",
-            "guidance": "difficult implementation, architecture-sensitive changes, or hard debugging"
-          },
-          {
-            "id": "deep",
-            "model": "openai-codex/gpt-6-astra",
-            "thinking": "high",
-            "guidance": "consequential planning, adversarial review, security, or data-loss work"
-          }
-        ],
-        "roles": {
-          "scout": "recon",
-          "commit": "mechanical",
-          "review": "deep"
-        }
-      },
-      "opencode-go": {
-        "enableAgentTool": true,
-        "routes": [
-          {
-            "id": "recon",
-            "model": "opencode-go/deepseek-v4-flash",
-            "thinking": "medium",
-            "guidance": "reconnaissance/routine checks"
-          },
-          {
-            "id": "implement",
-            "model": "opencode-go/glm-5.3-flash",
-            "thinking": "high",
-            "guidance": "implementation work"
-          },
-          {
-            "id": "review",
-            "model": "opencode-go/deepseek-v4.1-flash",
-            "thinking": "max",
-            "guidance": "code review"
-          },
-          {
-            "id": "deep",
-            "model": "opencode-go/deepseek-v4.1-flash",
-            "thinking": "max",
-            "guidance": "planning or consequential final review"
-          }
-        ],
-        "roles": {
-          "scout": "recon",
-          "review": "review",
-          "commit": "implement"
-        }
-      },
-      "openai": {
-        "enableAgentTool": true,
-        "routes": [
-          {
-            "id": "recon",
-            "model": "openai-codex/gpt-6-luna",
-            "thinking": "low",
-            "guidance": "reconnaissance/routine checks"
-          },
-          {
-            "id": "implement",
-            "model": "openai-codex/gpt-6-sol",
-            "thinking": "medium",
-            "guidance": "implementation and integration"
-          },
-          {
-            "id": "deep",
-            "model": "openai-codex/gpt-6-astra",
-            "thinking": "high",
-            "guidance": "planning or consequential final review"
-          }
-        ],
-        "roles": {
-          "scout": "recon",
-          "review": "deep",
-          "commit": "implement"
-        }
-      },
-      "copilot": {
-        "enableAgentTool": true,
-        "routes": [
-          {
-            "id": "recon",
-            "model": "github-copilot/gpt-6-luna",
-            "thinking": "medium",
-            "guidance": "reconnaissance/routine checks"
-          },
-          {
-            "id": "fast",
-            "model": "github-copilot/gpt-6-luna",
-            "thinking": "high",
-            "guidance": "explicitly requested fast parallel reconnaissance or routine work"
-          },
-          {
-            "id": "implement",
-            "model": "github-copilot/gpt-6-luna",
-            "thinking": "medium",
-            "guidance": "implementation and integration"
-          },
-          {
-            "id": "deep",
-            "model": "openai-codex/gpt-6-astra",
-            "thinking": "high",
-            "guidance": "difficult planning or consequential review"
-          }
-        ],
-        "roles": {
-          "scout": "recon",
-          "review": "deep",
-          "commit": "recon"
-        }
-      }
-    }
-  },
   "treeFilterMode": "no-tools",
   "theme": "dark",
   "showCacheMissNotices": true

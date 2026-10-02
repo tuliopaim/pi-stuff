@@ -1,632 +1,353 @@
-import * as fs from "node:fs";
-import * as path from "node:path";
-import { getAgentDir, getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { StringEnum } from "@earendil-works/pi-ai";
-import { Box, Key, Markdown, Text, matchesKey } from "@earendil-works/pi-tui";
+import { join, resolve } from "node:path";
+import { awaitWithContext, BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
+import { formatSkillsForPrompt, getAgentDir, getMarkdownTheme, type AgentToolResult, type ExtensionAPI, type ExtensionContext, type ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
+import { Box, Container, Key, Markdown, matchesKey, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { formatActivityStatus } from "../shared/activity-status.ts";
-import { showSubagents, showTakeover } from "./dashboard.ts";
-import { SubagentManager, truncateSubagentOutput } from "./manager.ts";
-import { isPendingSubagentStatus, type SubagentSnapshot } from "./domain.ts";
-import { formatSubagentUsage, formatWaitingSubagents, renderSubagentMonitor } from "./presentation.ts";
-import { discoverSubagentProfiles, resolveProfileSkillPaths } from "./profiles.ts";
-import { renderDelegationMessage } from "./render.ts";
-import {
-  createDelegationDetails,
-  DelegationAbortError,
-  getActiveSubagentPresetName,
-  getDelegationConfig,
-  getSubagentPresetNames,
-  isSubagentEnabled,
-  optionalString,
-  registerDelegatedTool,
-  registerDynamicRouteGuidance,
-  resolveRouteRef,
-  setSubagentPreset,
-  validateRoute,
-  type DelegationDetails,
-  type DelegationPolicy,
-} from "./runtime.ts";
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai/models";
+import { MemoryStorage } from "@earendil-works/pi-durable";
+import { createChildResources, resolveStandaloneChildProjectTrust } from "../shared/child-session.ts";
+import { configPath, getActiveSubagentPresetName, getAgents, getSubagentPresetNames, resolveAgent, saveAgentModel, setSubagentPreset, THINKING_LEVELS, type AgentConfig } from "./config.ts";
+import { AgentJobs, modelsFromRegistry, type Job, type JobResult } from "./durable.ts";
+import { registerDynamicRouteGuidance } from "./runtime.ts";
+import { showAgents } from "./dashboard.ts";
+import { activeJob, elapsed, jobActivity, jobColor, jobSummary, jobTitle, pendingJob, terminalText } from "./presentation.ts";
 
-const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
-const SESSION_MODES = ["standalone", "lineage-only", "fork"] as const;
+const SHORTCUTS = {
+  scout: { agent: "explore", description: "Delegate focused, read-only codebase reconnaissance to a cheaper model.", guidelines: ["Default to direct inspection. Use scout only for one narrow question that needs more than 2-3 files. Verify only evidence needed for edits. Do not use it for implementation or repeat completed exploration."] },
+  review: { agent: "review", description: "Delegate focused, read-only code review to a high-reasoning model.", guidelines: ["Use review only when explicitly requested or when a high-risk change needs independent review. Supply exact scope and intended behavior. Verify findings before acting. Review once unless new code is added."] },
+  commit: { agent: "commit", description: "Delegate completed-work analysis and intentional git commits to a specialized model.", guidelines: ["Use commit only when the user explicitly requests commits. Pass scope and splitting instructions. The child owns inspection, staging, and commits."] },
+} as const;
 
-// The model/thinking fields on the policies below are fallbacks used only when
-// no subagent preset is active. Whenever a preset is active, getDelegationConfig
-// resolves every child through that preset's roles, and an explicit `route`
-// argument on a call overrides both. See README "Subagents".
-const SCOUT: DelegationPolicy = {
-  key: "scout",
-  name: "Scout",
-  model: "opencode-go/deepseek-v4-flash",
-  thinking: "medium",
-  mutating: false,
-  timeoutMs: 30 * 60_000,
-  tools: "read,grep,find,ls",
-  description: "Delegate focused, read-only codebase reconnaissance to a cheaper model.",
-  snippet: "Delegate focused codebase reconnaissance to a cheaper read-only model",
-  guidelines: [
-    "Default to direct inspection. Use scout only for a narrow reconnaissance question that would otherwise require exploring more than 2-3 files.",
-    "Do not use scout for work answerable with one or two direct reads, after equivalent reconnaissance is already done, for implementation, or for decisions requiring your own judgment.",
-    "Use one scout by default. Use a second only when two reconnaissance questions are independent and combining them would make either scout broad or duplicative.",
-    "After scout returns, read only its recommended targets and verify only claims that affect edits or important decisions.",
-  ],
-  parameter: "One narrow, self-contained reconnaissance question, including the evidence the parent needs",
-  prompt: `You are a read-only codebase scout. Your job is to reduce the parent agent's context usage. Investigate one delegated question; do not implement, edit files, run builds, or run tests.
+export function formatResult(result: JobResult) {
+  const { job } = result;
+  const question = job.status === "waiting" ? `\n\nAnswer with agent({ action: "message", id: "${job.name ?? job.id}", task: "your answer" }). This resumes the same child.` : "";
+  return `${job.name ?? job.agent} (${job.id}) [${job.status}]\n${jobSummary(job, result)}\n\n${result.output}${question}`;
+}
 
-Return only this compact handoff:
-## Answer
-Direct answer in at most 3 bullets.
+type RenderContext = { expanded?: boolean; args?: { task?: string }; state?: { config?: AgentConfig; configKey?: string } };
+type Theme = ExtensionContext["ui"]["theme"];
+function renderCall(agent: string, args: { task?: string; route?: string; name?: string; background?: boolean; action?: string; id?: string }, theme: Theme, ctx?: RenderContext) {
+  const key = JSON.stringify([agent, args.route]);
+  let config = ctx?.state?.configKey === key ? ctx.state.config : undefined;
+  if (!args.action || args.action === "run") {
+    try { config ??= resolveAgent(agent, args.route); } catch { /* Configuration errors appear in the result. */ }
+  } else config = undefined;
+  if (ctx?.state) { ctx.state.config = config; ctx.state.configKey = key; }
+  const label = args.action && args.action !== "run" ? `${args.action} ${args.id ?? "agents"}` : `${args.name ?? agent}${args.background ? " in background" : ""}`;
+  return new Text(theme.fg("toolTitle", terminalText(label).replace(/\s+/g, " ")) + (config ? theme.fg("dim", ` · ${config.model}:${config.thinking}`) : "") +
+    (args.task ? `\n${terminalText(args.task)}` : "") + (ctx?.expanded && config ? `\n\nAgent instructions:\n${terminalText(config.instructions)}` : ""), 0, 0);
+}
+function renderResult(result: AgentToolResult<unknown>, options: ToolRenderResultOptions, theme: Theme, ctx?: RenderContext) {
+  const details = result.details as Partial<JobResult> | undefined;
+  const job = details?.job;
+  const output = terminalText(details?.output ?? result.content.filter((part) => part.type === "text").map((part) => part.text).join("\n"));
+  if (!job) return new Markdown(output, 0, 0, getMarkdownTheme());
+  const body = new Container();
+  body.addChild(new Text(theme.fg(jobColor(job), `${job.agent} · ${job.status}${job.name ? ` · ${job.name}` : ""}`) + theme.fg("dim", `\n${jobSummary(job, details)}`), 0, 0));
+  if (options.expanded) {
+    const instructions = details?.instructions ?? ctx?.state?.config?.instructions;
+    body.addChild(new Text(`\nTask:\n${terminalText(job.task ?? ctx?.args?.task ?? "")}\n\nAgent instructions:\n${terminalText(instructions ?? "See the durable conversation's saved instructions.")}\n`, 0, 0));
+  }
+  body.addChild(new Markdown(options.expanded || job.status === "waiting" ? output : output.split("\n").slice(-6).join("\n"), 0, 0, getMarkdownTheme()));
+  if (job.status === "waiting") body.addChild(new Text(theme.fg("warning", `Answer with agent action message, id ${job.name ?? job.id}.`), 0, 0));
+  return body;
+}
 
-## Relevant flow
-- symbol — path:line
-- → caller or consumer — path:line
-- → test, when relevant — path:line
+export async function agentInstructions(config: AgentConfig, cwd: string, ctx: ExtensionContext, signal?: AbortSignal) {
+  const setupSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(300_000)]) : AbortSignal.timeout(300_000);
+  const skills = config.skills;
+  const { loader } = await awaitWithContext(createChildResources({
+    cwd, projectTrusted: resolveStandaloneChildProjectTrust({ parentCwd: ctx.cwd, childCwd: cwd, parentTrusted: ctx.isProjectTrusted() }),
+    noExtensions: true, noPromptTemplates: true,
+    noSkills: skills !== undefined && !skills.includes("*"),
+    ...(skills?.length && !skills.includes("*") ? { additionalSkillPaths: skills } : {}),
+  }), withAbortSignal(setupSignal, BACKGROUND_CONTEXT));
+  return [
+    "You are a delegated coding assistant. Work only on the assigned task. You cannot ask the user directly or start subagents. If blocked, use ask_question to ask the parent one question. It parks your job until the parent answers and resumes this conversation. Do not call other tools after asking. Available tools: ask_question, " + config.tools.join(", "),
+    ...loader.getAgentsFiles().agentsFiles.map((file) => `## Instructions from ${file.path}\n${file.content}`),
+    formatSkillsForPrompt(loader.getSkills().skills),
+    `Working directory: ${cwd}`,
+    config.instructions,
+  ].join("\n\n");
+}
 
-## Parent should read
-- At most 3 exact files or line ranges required for the next decision.
-
-## Unknowns
-- Only uncertainties that could change the implementation, or "None".
-
-Rules:
-- Stop when the delegated question is answered.
-- Include at most 8 evidence references and 500 words.
-- Prefer exact symbols, paths, and line numbers over prose.
-- Trace definitions and callers when relevant.
-- Do not include large code excerpts or general architecture commentary unless requested.`,
-  maxLines: 200,
-  maxBytes: 24 * 1024,
-  emptyOutput: "(scout returned no output)",
-  truncationMessage: "[Scout output truncated to 200 lines / 24KB]",
-};
-
-const REVIEW: DelegationPolicy = {
-  key: "review",
-  name: "Review",
-  model: "openai-codex/gpt-5.6-sol",
-  thinking: "high",
-  mutating: false,
-  timeoutMs: 30 * 60_000,
-  tools: "read,grep,find,ls",
-  description: "Delegate focused, read-only code review to a high-reasoning model.",
-  snippet: "Delegate focused code review to a high-reasoning model",
-  guidelines: [
-    "Use review only when the user explicitly requests it, or after a high-risk change where an independent fresh-context review is materially useful; do not invoke it automatically.",
-    "Give review the exact scope: working tree, commit/range, or named files, plus intended behavior.",
-    "Use review at most once per change unless new code is added after the review.",
-    "Treat review findings as leads; verify each finding yourself before changing code or reporting it as fact.",
-  ],
-  parameter: "Review scope and intended behavior, including commit/range or files when known",
-  prompt: `You are a read-only code reviewer. Review the delegated change or scope; do not edit files.
-
-Return only this compact handoff:
-## Findings
-For each real issue, ordered by severity:
-### [P0-P3] Short title
-- Evidence: path:line
-- Impact: what breaks and under which conditions
-- Fix: smallest correct change
-
-If there are no findings, write "No findings."
-
-## Validation gaps
-- Important behavior you could not verify, or "None".
-
-## Verdict
-One sentence stating whether the change is safe to merge.
-
-Rules:
-- Prioritize correctness, security, data loss, regressions, and missing validation.
-- Review the actual diff and trace affected callers when relevant.
-- Do not report style preferences, speculative concerns, or pre-existing issues unrelated to the change.
-- Use only the provided read-only tools; do not modify files or run commands.
-- Do not run builds or tests unless the delegated task explicitly asks.
-- Prefer exact file paths and line numbers over prose.
-- Stay under 1,200 words.`,
-  maxLines: 250,
-  maxBytes: 32 * 1024,
-  emptyOutput: "(review returned no output)",
-  truncationMessage: "[Review output truncated to 250 lines / 32KB]",
-};
-
-const COMMIT: DelegationPolicy = {
-  key: "commit",
-  name: "Commit",
-  model: "opencode-go/deepseek-v4-flash",
-  thinking: "medium",
-  mutating: true,
-  timeoutMs: 30 * 60_000,
-  tools: "read,grep,find,ls,bash",
-  description: "Delegate completed-work analysis and intentional git commits to a specialized model.",
-  snippet: "Delegate git commit creation to a specialized child",
-  guidelines: [
-    "Use commit only when the user explicitly asks to commit completed work.",
-    "Pass any requested scope or commit-splitting instructions in the task.",
-    "Do not inspect, stage, or commit in the parent; the specialized commit agent owns the complete workflow.",
-  ],
-  parameter: "Optional commit scope, ticket context, or commit-splitting instructions",
-  prompt: "You are a specialized git commit agent sharing the current working tree. Use the commit-work skill and follow it exactly. Inspect all changes before staging, keep unrelated work uncommitted, never expose secrets, never amend or force push, and report each created commit's SHA and message.",
-  maxLines: 200,
-  maxBytes: 24 * 1024,
-  emptyOutput: "(commit agent returned no output)",
-  truncationMessage: "[Commit output truncated to 200 lines / 24KB]",
-};
-
-const AGENT: DelegationPolicy = {
-  key: "agent",
-  name: "Agent",
-  model: "opencode-go/kimi-k2.7-code",
-  thinking: "high",
-  mutating: true,
-  dynamicModel: true,
-  inheritResources: true,
-  timeoutMs: 30 * 60_000,
-  description: "Delegate general-purpose coding work to a persistent agent using a task-appropriate model and reasoning level.",
-  snippet: "Delegate implementation or other general-purpose coding work to a persistent agent",
-  guidelines: [
-    "Use the fewest agents that materially reduce context, uncertainty, or elapsed time: default to zero for clear local work, and use one for a self-contained delegated workstream.",
-    "Use agent when the user asks to delegate, or when one agent can independently own a substantial implementation or investigation while the parent avoids overlapping edits.",
-    "Do not split connected implementation across agents in one working tree. Fan out only independent read-only work, or mutating work in separate working trees.",
-    "The agent inherits extensions, skills, and project context. Give it a self-contained task with the intended behavior and validation requirements.",
-    "Run agent synchronously and do not edit the same working tree while it is running.",
-  ],
-  parameter: "A self-contained task, including intended behavior and validation requirements",
-  prompt: `You are a delegated general-purpose coding agent. Complete the assigned task independently in the current working tree.
-
-Inspect the relevant code before editing. Make the smallest correct change, run focused validation, and report the files changed and checks run. Follow inherited project instructions and skills. Do not spawn other agents. Do not commit unless the task explicitly asks you to.`,
-  maxLines: 300,
-  maxBytes: 40 * 1024,
-  emptyOutput: "(agent returned no output)",
-  truncationMessage: "[Agent output truncated to 300 lines / 40KB]",
-};
-
-export default function (
-  pi: ExtensionAPI,
-  createManager: (ctx: ExtensionContext, parentSessionId: string, onSettled: (snapshot: SubagentSnapshot) => void, onQuestion: (snapshot: SubagentSnapshot) => void) => SubagentManager
-    = (ctx, parentSessionId, onSettled, onQuestion) => new SubagentManager(ctx, parentSessionId, onSettled, { onQuestion }),
-) {
+export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) {
   if (process.env.PI_DELEGATED === "1") return;
   registerDynamicRouteGuidance(pi);
-
-  let manager: SubagentManager | undefined;
+  let jobs: AgentJobs | undefined;
   let context: ExtensionContext | undefined;
   let unsubscribe: (() => void) | undefined;
   let updateTimer: ReturnType<typeof setTimeout> | undefined;
-  let monitorClock: ReturnType<typeof setInterval> | undefined;
-  const acknowledged = new Set<string>();
-  const announcedQuestions = new Set<string>();
-  const pendingResults = new Map<string, SubagentSnapshot>();
-  const getManager = () => {
-    if (!manager) throw new Error("Subagent manager is not ready yet.");
-    return manager;
-  };
-  const updateStatus = () => {
-    if (!context?.hasUI || !manager) return;
-    const entries = manager.list();
-    const running = entries.filter((entry) => isPendingSubagentStatus(entry.status)).length;
-    const done = entries.filter((entry) => entry.status === "done" && !acknowledged.has(entry.id)).length;
-    const failed = entries.filter((entry) => !isPendingSubagentStatus(entry.status) && entry.status !== "done" && !acknowledged.has(entry.id)).length;
-    context.ui.setStatus("subagents", running || done || failed
-      ? formatActivityStatus(context.ui.theme, "subagents", { running, done, failed })
-      : undefined);
-    // Foreground one-off agents already own a tool card. The persistent monitor
-    // is only for subagent_spawn jobs that otherwise have no live home.
-    const monitored = entries.filter((entry) =>
-      entry.origin === "generic" && (isPendingSubagentStatus(entry.status) || !entry.consumed));
-    context.ui.setWidget?.("subagents-monitor", monitored.length
-      ? (_tui, theme) => ({
-          render: (width) => renderSubagentMonitor(monitored, width, theme),
-          invalidate() {},
-        })
-      : undefined);
-    const shouldTick = monitored.some((entry) => entry.status === "running" || entry.status === "stalled");
-    if (shouldTick && !monitorClock) {
-      monitorClock = setInterval(updateStatus, 1_000);
-      monitorClock.unref?.();
-    } else if (!shouldTick && monitorClock) {
-      clearInterval(monitorClock);
-      monitorClock = undefined;
+  let flushing = false;
+  const pendingReports = new Set<string>();
+  const getJobs = () => { if (!jobs) throw new Error("Agent jobs are not ready"); return jobs; };
+
+  const update = async () => {
+    const current = jobs;
+    const ctx = context;
+    if (!current || !ctx) return;
+    const entries = await current.list();
+    if (current !== jobs) return;
+    const counts = ["running", "waiting", "stalled", "done", "failed", "cancelled"].flatMap((status) => {
+      const count = entries.filter((job) => job.status === status).length;
+      return count ? [`${count} ${status}`] : [];
+    });
+    if (ctx.hasUI) {
+      ctx.ui.setStatus("subagents", counts.length ? counts.join(" · ") : undefined);
+      const background = entries.filter((job) => job.background).sort((a, b) => Number(pendingJob(b)) - Number(pendingJob(a)) || (b.createdAt ?? b.startedAt) - (a.createdAt ?? a.startedAt)).slice(0, 4);
+      const summaries = await Promise.all(background.map(async (job) => ({ job, metadata: await current.metadata?.(job.id) })));
+      if (current !== jobs) return;
+      ctx.ui.setWidget("subagents-monitor", summaries.length ? (_tui, theme) => ({
+        invalidate() {},
+        render: (width) => [theme.fg("accent", `SUBAGENTS · ${counts.join(" · ")}`), ...summaries.flatMap(({ job, metadata }) => [
+          theme.fg(jobColor(job), jobTitle(job)), theme.fg("dim", `  ${jobSummary(job, metadata)}`),
+          theme.fg("muted", `  ${jobActivity(job, current.preview(job.id))}`),
+        ]), theme.fg("dim", "/subagents to inspect, answer, or cancel")].map((line) => truncateToWidth(line, width)),
+      }) : undefined);
     }
+    if (flushing) return;
+    flushing = true;
+    try {
+      for (const job of entries.filter((job) => !activeJob(job) && !job.delivered)) {
+        const customType = job.status === "waiting" ? "agent-question" : "agent-result";
+        const persisted = () => ctx.sessionManager.getBranch().some((entry: any) =>
+          (entry.type === "custom_message" && entry.customType === customType && entry.details?.job?.requestId === job.requestId) ||
+          (entry.type === "message" && entry.message?.role === "toolResult" && entry.message.details?.job?.requestId === job.requestId && entry.message.details.job.status === job.status));
+        if (!persisted() && job.background && !pendingReports.has(job.requestId)) {
+          const result = await current.result(job.id);
+          if (current !== jobs) return;
+          if (result.job.requestId !== job.requestId || activeJob(result.job)) continue;
+          pi.sendMessage({ customType, content: formatResult(result), details: result, display: true }, { deliverAs: "followUp", triggerTurn: true });
+          pendingReports.add(job.requestId);
+        }
+        // Queued parent messages are not durable yet. A restart must be able to deliver them again.
+        if (persisted()) { await current.acknowledge(job.id, job.requestId); pendingReports.delete(job.requestId); }
+      }
+    } finally { flushing = false; }
   };
   const scheduleUpdate = () => {
     if (updateTimer) return;
-    updateStatus();
     updateTimer = setTimeout(() => {
       updateTimer = undefined;
-      updateStatus();
+      void update().catch((error) => context?.ui.notify(String(error), "error"));
     }, 100);
-    updateTimer.unref?.();
-  };
-  const settled = (snapshot: SubagentSnapshot) => {
-    if (!context) return;
-    if (snapshot.origin === "btw") {
-      const answer = truncateSubagentOutput(snapshot.output || "(no output)", 300, 24 * 1024, "[Answer truncated]", snapshot.sessionFile).output;
-      pi.appendEntry("btw-result", {
-        id: snapshot.id, title: snapshot.title, status: snapshot.status, question: snapshot.task,
-        answer, error: snapshot.error, sessionFile: snapshot.sessionFile,
-      });
-      context.ui.notify(`By the way “${snapshot.title}” ${snapshot.status === "done" ? "answered" : "failed"} — /subagents to reopen`, snapshot.status === "done" ? "info" : "error");
-    } else if (!snapshot.consumed) {
-      pendingResults.set(snapshot.id, { ...snapshot });
-      if (context.isIdle()) flushResults();
-    }
-    updateStatus();
-  };
-  const flushResults = () => {
-    for (const snapshot of pendingResults.values()) {
-      const bounded = truncateSubagentOutput(snapshot.output || "(no output)", 300, 40 * 1024, "[Subagent output truncated]", snapshot.sessionFile);
-      try {
-        pi.sendMessage({
-          customType: "subagent-result", display: true,
-          content: `Subagent ${snapshot.name} (${snapshot.id}) “${snapshot.title}” ${snapshot.status}.\n${formatSubagentUsage(snapshot)}\n\n${snapshot.error ? `Error: ${snapshot.error}\n\n` : ""}${bounded.output}`,
-          details: { id: snapshot.id, name: snapshot.name, title: snapshot.title, status: snapshot.status },
-        }, { deliverAs: "followUp", triggerTurn: true });
-        manager?.consume(snapshot.id);
-        pendingResults.delete(snapshot.id);
-      } catch {}
-    }
-  };
-  const announceQuestion = (snapshot: SubagentSnapshot) => {
-    if (!snapshot.question || snapshot.origin === "btw") return;
-    const key = `${snapshot.id}:${snapshot.question.askedAt}`;
-    if (announcedQuestions.has(key)) return;
-    pi.sendMessage({
-      customType: "subagent-question", display: true,
-      content: `Subagent ${snapshot.name} (${snapshot.id}) is waiting for your answer.\n\n${snapshot.question.text}\n\nReply with: subagent_message({ name: "${snapshot.name}", message: "..." })`,
-      details: { id: snapshot.id, name: snapshot.name, question: snapshot.question.text },
-    }, { deliverAs: "steer", triggerTurn: true });
-    announcedQuestions.add(key);
+    updateTimer.unref();
   };
 
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_start", async (_event, ctx) => {
+    if (!pi.getActiveTools().some((name) => ["agent", "scout", "review", "commit"].includes(name))) return;
     context = ctx;
-    manager = createManager(ctx, ctx.sessionManager.getSessionId(), settled, announceQuestion);
-    for (const entry of manager.list()) {
-      if (!isPendingSubagentStatus(entry.status)) acknowledged.add(entry.id);
-      if (entry.origin === "generic" && !isPendingSubagentStatus(entry.status) && !entry.consumed) pendingResults.set(entry.id, entry);
-      if (entry.status === "waiting") announceQuestion(entry);
-    }
-    unsubscribe = manager.subscribe(scheduleUpdate);
-    updateStatus();
-    if (pendingResults.size) queueMicrotask(flushResults);
-    const active = getActiveSubagentPresetName();
-    if (active && !getSubagentPresetNames().includes(active)) ctx.ui.notify(`Unknown subagent preset "${active}"`, "warning");
+    setSubagentPreset(undefined);
+    const saved = ctx.sessionManager.getBranch().findLast((entry: any) => entry.type === "custom" && entry.customType === "agent-preset") as { data?: { name?: string } } | undefined;
+    if (saved?.data?.name) setSubagentPreset(saved.data.name);
+    getAgents(); // Invalid configuration fails visibly, never falls back to an unintended provider.
+    jobs = await openJobs({ models: modelsFromRegistry(ctx.modelRegistry, ctx.sessionManager.getSessionId()), ...(ctx.sessionManager.getSessionFile()
+      ? { database: join(getAgentDir(), "subagents", `${ctx.sessionManager.getSessionId()}.sqlite`) }
+      : { storage: new MemoryStorage() }) });
+    unsubscribe = jobs.subscribe(scheduleUpdate);
+    await jobs.resume();
+    await update();
   });
-
+  pi.on("agent_settled", () => {
+    pendingReports.clear(); // A cancelled parent run may have discarded its queued follow-ups.
+    scheduleUpdate();
+  });
+  pi.on("message_end", scheduleUpdate);
   pi.on("session_shutdown", async (_event, ctx) => {
     unsubscribe?.(); unsubscribe = undefined;
     if (updateTimer) clearTimeout(updateTimer);
     updateTimer = undefined;
-    if (monitorClock) clearInterval(monitorClock);
-    monitorClock = undefined;
+    const closing = jobs; jobs = undefined; context = undefined;
+    pendingReports.clear();
     ctx.ui.setStatus("subagents", undefined);
-    ctx.ui.setWidget?.("subagents-monitor", undefined);
-    pendingResults.clear();
-    announcedQuestions.clear();
-    const closing = manager; manager = undefined; context = undefined;
-    await closing?.shutdown();
+    ctx.ui.setWidget("subagents-monitor", undefined);
+    await closing?.close();
   });
-  pi.on("agent_settled", flushResults);
 
-  if (isSubagentEnabled(SCOUT.key)) registerDelegatedTool(pi, SCOUT, getManager);
-  if (isSubagentEnabled(REVIEW.key)) registerDelegatedTool(pi, REVIEW, getManager);
-
-  if (isSubagentEnabled(COMMIT.key)) {
-    const runCommit = registerDelegatedTool(pi, COMMIT, getManager);
-    pi.registerMessageRenderer<DelegationDetails>("commit-result", (message, { expanded }, theme) =>
-      message.details ? renderDelegationMessage("Commit", message.details, expanded, theme) : undefined,
-    );
-
-    pi.registerCommand("commit", {
-    description: "Create intentional commits with the specialized commit agent",
-      handler: async (args, ctx) => {
-      if (!ctx.isIdle()) {
-        ctx.ui.notify("Agent is busy", "warning");
-        return;
-      }
-      const task = args.trim() || "Analyze all completed work and create the appropriate commit or commits.";
-      const controller = new AbortController();
-      let latest: DelegationDetails | undefined;
-
-      const showWidget = (details: DelegationDetails) => {
-        latest = details;
-        ctx.ui.setWidget("commit", (_tui, theme) => renderDelegationMessage("Commit", details, false, theme));
-      };
-      // The command path gets no harness-supplied signal, so escape is wired up by hand.
-      const stopListening = ctx.ui.onTerminalInput?.((data) => {
-        if (!matchesKey(data, Key.escape)) return undefined;
-        controller.abort();
-        return { consume: true };
-      });
-
-      try {
-        const details = await runCommit(task, ctx.cwd, controller.signal, showWidget);
-        pi.sendMessage({ customType: "commit-result", content: details.output, display: true, details });
-      } catch (error) {
-        const cancelled = error instanceof DelegationAbortError;
-        const message = error instanceof Error ? error.message : String(error);
-        const details: DelegationDetails = {
-          ...(latest ?? createDelegationDetails(getDelegationConfig(COMMIT.key, COMMIT), task)),
-          status: cancelled ? "cancelled" : "failed",
-          error: message,
-        };
-        pi.sendMessage({
-          customType: "commit-result",
-          content: details.output || `Commit agent ${cancelled ? "cancelled" : "failed"}: ${message}`,
-          display: true,
-          details,
-        });
-        if (!cancelled) ctx.ui.notify(message, "error");
-      } finally {
-        stopListening?.();
-        ctx.ui.setWidget("commit", undefined);
-      }
-      },
-    });
-  }
-
-  if (isSubagentEnabled(AGENT.key)) registerDelegatedTool(pi, AGENT, getManager);
+  const run = async (agent: string, task: string, ctx: ExtensionContext, route?: string, background = false, signal?: AbortSignal, onUpdate?: (result: any) => void, cwd = ctx.cwd, options?: { name?: string; title?: string }) => {
+    const current = getJobs();
+    const config = resolveAgent(agent, route);
+    const slash = config.model.indexOf("/");
+    if (!ctx.modelRegistry.find(config.model.slice(0, slash), config.model.slice(slash + 1))) throw new Error(`Unknown model "${config.model}"`);
+    const instructions = await agentInstructions(config, cwd, ctx, signal);
+    const job = await current.spawn(agent, { ...config, instructions }, task, cwd, background, signal, options);
+    if (background) return { content: [{ type: "text" as const, text: `Started ${agent} job ${job.name ?? job.id} (${job.id}). Results and questions arrive automatically. Use agent action wait, status, message, or cancel with its name or id.` }], details: { job } };
+    let stopped = false, feedbackTimer: ReturnType<typeof setTimeout> | undefined;
+    const emit = () => {
+      if (stopped || feedbackTimer || !onUpdate) return;
+      feedbackTimer = setTimeout(() => {
+        feedbackTimer = undefined;
+        void current.result(job.id).then((info) => {
+          if (!stopped) onUpdate({ content: [{ type: "text", text: current.preview(job.id) || info.output }], details: info });
+        }).catch(() => {});
+      }, 100);
+    };
+    const stop = current.subscribe(emit);
+    onUpdate?.({ content: [{ type: "text", text: current.preview(job.id) || "Working" }], details: { job } });
+    try {
+      const result = await current.wait(job.id, signal);
+      return { content: [{ type: "text" as const, text: formatResult(result) }], details: result, usage: result.usage, isError: result.job.status === "failed" || result.job.status === "cancelled" };
+    } finally { stopped = true; stop(); if (feedbackTimer) clearTimeout(feedbackTimer); }
+  };
 
   pi.registerTool({
-    name: "subagent_spawn", label: "Spawn Subagent",
-    description: "Start a persistent Pi subagent in the background and return its ID. Max four running; one mutating agent per working tree.",
-    promptSnippet: "Start a persistent background subagent for an independent workstream",
+    name: "agent", label: "Agent", exposure: "model-only",
+    description: "Run a named subagent or manage its durable background job. Omit agent to use default for implementation and useful handoffs without a specialist. Results of background jobs arrive automatically, including after a restart.",
+    promptSnippet: "Delegate a self-contained task; default handles work without a specialist",
     promptGuidelines: [
-      "Default to no background subagent for clear local work. Spawn one only when it can proceed independently without overlapping the parent's edits.",
-      "Use two to four only for genuinely independent workstreams in separate working trees. For parallel read-only fan-out in one tree, use workflow instead.",
-      "Treat four as a hard ceiling, not a target. Wait for results only when the parent needs them for its next decision.",
-      "Choose each child's model and thinking level from the active subagent preset routes.",
-      "When the user names a specific model or lane, pass it in `route` (route id or provider/model); an explicit user pick overrides preset roles.",
+      "Use the fewest subagents that materially reduce context, uncertainty, or elapsed time. Direct work is fine; hand off self-contained work when useful even without an explicit delegation request.",
+      "Omit agent for general-purpose handoffs. Use explore for reconnaissance, review for independent review, and plan for planning. Never use commit unless the user explicitly requests commits.",
+      "Max four running jobs and one mutating child per working tree. Do not overlap parent edits with a mutating child. Use background only for work independent of the parent's next step.",
+      "Children have built-in tools, project instructions, and skills, but no executable extensions or recursive delegation. They can ask the parent questions with ask_question and pause. Answer waiting jobs with agent action message using the job's name or id. Supply a complete task and validation requirements.",
     ],
     parameters: Type.Object({
-      task: Type.String({ description: "Self-contained task" }),
-      name: Type.Optional(Type.String({ description: "Short display name; defaults to the profile or subagent" })),
-      agent: Type.Optional(Type.String({ description: "Declarative agent profile name from subagent_profiles" })),
-      model: Type.Optional(Type.String({ description: "Exact provider/model id (required unless `route` is given)" })),
-      thinking: Type.Optional(Type.String({ description: "off|minimal|low|medium|high|xhigh|max (required unless `route` is given)" })),
-      route: Type.Optional(Type.String({ description: "Route id or provider/model from the active preset; overrides `model`/`thinking`" })),
-      working_dir: Type.Optional(Type.String({ description: "Working directory; defaults to the parent cwd" })),
-      session_mode: Type.Optional(StringEnum(SESSION_MODES, { description: "standalone, lineage-only, or fork; fork copies parent conversation context" })),
+      action: Type.Optional(Type.Union(["run", "list", "status", "wait", "message", "cancel"].map((value) => Type.Literal(value)))),
+      agent: Type.Optional(Type.String({ description: "Configured agent name; defaults to default" })),
+      task: Type.Optional(Type.String({ description: "Self-contained task or message" })),
+      id: Type.Optional(Type.String({ description: "Job name or UUID for status, wait, message, or cancel" })),
+      name: Type.Optional(Type.String({ description: "Optional unique lowercase handle for this job", pattern: "^[a-z0-9][a-z0-9-]{0,63}$" })),
+      title: Type.Optional(Type.String({ description: "Short dashboard title", maxLength: 200 })),
+      background: Type.Optional(Type.Boolean()),
+      route: Type.Optional(Type.String({ description: "Explicit model override: agent name or provider/model[:thinking]" })),
+      working_dir: Type.Optional(Type.String()),
     }),
-    async execute(_id, params, signal, _update, ctx) {
-      const discovery = discoverSubagentProfiles({ agentDir: getAgentDir(), cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted() });
-      const profileName = optionalString(params.agent);
-      const profile = profileName ? discovery.profiles.find((candidate) => candidate.name === profileName) : undefined;
-      if (profileName && !profile) {
-        const diagnostics = discovery.errors.map((item) => `${item.path}: ${item.error}`).join("\n");
-        throw new Error(`Unknown subagent profile "${profileName}".${diagnostics ? `\nProfile errors:\n${diagnostics}` : ""}`);
+    async execute(_call, args, signal, onUpdate, ctx) {
+      const action = args.action ?? "run";
+      if (action === "run") return run(args.agent ?? "default", args.task ?? "", ctx, args.route, args.background, signal, onUpdate, args.working_dir ? resolve(ctx.cwd, args.working_dir) : ctx.cwd, { name: args.name, title: args.title });
+      const current = getJobs();
+      if (action === "list") {
+        const configured = Object.entries(getAgents()).map(([name, config]) => `${name}: ${config.description} (${config.model}:${config.thinking})`);
+        const entries = await current.list();
+        return { content: [{ type: "text", text: [...configured, "", ...entries.map((job) => `${job.name ?? job.id} (${job.id}) ${job.agent} [${job.status}] ${(job.title ?? job.task).slice(0, 120)}${job.question ? `\n  Question: ${job.question.text}` : ""}`)].join("\n") }], details: { jobs: entries } };
       }
-      let model: string;
-      let thinking: string;
-      const routeRef = optionalString(params.route);
-      if (routeRef) {
-        const route = resolveRouteRef(routeRef);
-        model = route.model;
-        thinking = route.thinking;
-      } else if (optionalString(params.model) || optionalString(params.thinking)) {
-        if (!optionalString(params.model) || !optionalString(params.thinking)) throw new Error("Provide both `model` and `thinking`.");
-        if (!THINKING_LEVELS.has(params.thinking)) throw new Error(`Invalid thinking level: ${params.thinking}`);
-        const v = validateRoute(params.model, params.thinking);
-        if (!v.allowed) throw new Error(v.error);
-        model = params.model;
-        thinking = params.thinking;
-      } else if (profile?.route) {
-        const route = resolveRouteRef(profile.route);
-        model = route.model;
-        thinking = route.thinking;
-      } else if (profile?.model && profile.thinking) {
-        const v = validateRoute(profile.model, profile.thinking);
-        if (!v.allowed) throw new Error(v.error);
-        model = profile.model;
-        thinking = profile.thinking;
-      } else {
-        throw new Error("Provide `agent`, `route`, or both `model` and `thinking`.");
+      if (!args.id) throw new Error(`${action} requires id`);
+      if (action === "message") {
+        const job = await current.message(args.id, args.task ?? "");
+        return { content: [{ type: "text", text: `Message sent to ${job.id}` }], details: { job } };
       }
-      const cwd = params.working_dir ? path.resolve(ctx.cwd, params.working_dir) : profile?.cwd ?? ctx.cwd;
-      if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) throw new Error(`working_dir is not a directory: ${cwd}`);
-      const name = optionalString(params.name) ?? profile?.name ?? "subagent";
-      const sessionMode = params.session_mode ?? profile?.sessionMode ?? "standalone";
-      const profileSkillPaths = profile ? await resolveProfileSkillPaths(profile, {
-        agentDir: getAgentDir(), cwd, projectTrusted: ctx.isProjectTrusted(),
-      }) : undefined;
-      const snapshot = await getManager().spawn({
-        origin: "generic", name, title: name, task: params.task, cwd,
-        model, thinking, sessionMode, parentSessionFile: ctx.sessionManager.getSessionFile(), mutating: profile?.mutating ?? true,
-        config: profile ? {
-          name: profile.name, prompt: profile.prompt, timeoutMs: profile.timeoutMs, tools: profile.tools,
-          skills: profileSkillPaths, inheritResources: profile.inheritResources,
-        } : { name: "Agent", prompt: AGENT.prompt, timeoutMs: AGENT.timeoutMs, inheritResources: true },
-        signal,
+      if (action === "cancel") await current.cancel(args.id);
+      const result = action === "wait" ? await current.wait(args.id, signal) : await current.result(args.id);
+      return { content: [{ type: "text", text: formatResult(result) }], details: result, isError: result.job.status === "failed" };
+    },
+    renderCall: (args, theme, ctx) => renderCall(args.agent ?? "default", args, theme, ctx),
+    renderResult,
+  });
+  for (const [name, shortcut] of Object.entries(SHORTCUTS)) pi.registerTool({
+    name, label: name, exposure: "model-only", description: shortcut.description,
+    promptGuidelines: [...shortcut.guidelines, "An explicit user model pick goes in route and overrides this agent's model."],
+    parameters: Type.Object({ task: Type.String(), route: Type.Optional(Type.String({ description: "Agent name or provider/model[:thinking]" })) }),
+    execute: (_call, args, signal, onUpdate, ctx) => run(shortcut.agent, args.task, ctx, args.route, false, signal, onUpdate),
+    renderCall: (args, theme, ctx) => renderCall(shortcut.agent, args, theme, ctx),
+    renderResult,
+  });
+  for (const name of ["agent-result", "agent-question"]) pi.registerMessageRenderer<JobResult>(name, (message, options, theme) => {
+    const result = message.details;
+    const box = new Box(1, 1, result ? (text) => theme.bg(result.job.status === "done" ? "toolSuccessBg" : pendingJob(result.job) ? "toolPendingBg" : "toolErrorBg", text) : undefined);
+    const content = typeof message.content === "string" ? message.content : message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
+    box.addChild(renderResult({ content: [{ type: "text", text: content }], details: result }, { expanded: options?.expanded ?? true, isPartial: false }, theme));
+    return box;
+  });
+
+  const configureAgents = async (ctx: ExtensionContext) => {
+    const agents = getAgents();
+    const name = await ctx.ui.select("Configure agent", Object.entries(agents).map(([name, agent]) => `${name} · ${agent.model}:${agent.thinking}`));
+    if (!name) return;
+    const agent = name.split(" · ")[0];
+    const available = ctx.modelRegistry.getAvailable().map((model) => `${model.provider}/${model.id}`)
+      .filter((model) => getActiveSubagentPresetName() !== "copilot" || model.startsWith("github-copilot/"));
+    const model = await ctx.ui.select(`Model for ${agent}`, available);
+    if (!model) return;
+    const slash = model.indexOf("/");
+    const selectedModel = ctx.modelRegistry.find(model.slice(0, slash), model.slice(slash + 1));
+    const thinking = await ctx.ui.select("Thinking level", selectedModel ? getSupportedThinkingLevels(selectedModel) : [...THINKING_LEVELS]);
+    if (!thinking) return;
+    saveAgentModel(agent, model, thinking as AgentConfig["thinking"]);
+    ctx.ui.notify(`Saved ${agent} in ${configPath()}`, "info");
+  };
+  const selectPreset = async (args: string, ctx: ExtensionContext) => {
+    const name = args.trim() || await ctx.ui.select(`Agent preset (${getActiveSubagentPresetName()})`, getSubagentPresetNames());
+    if (name) { setSubagentPreset(name); pi.appendEntry("agent-preset", { name }); ctx.ui.notify(`Agent preset ${name}`, "info"); }
+  };
+  pi.registerCommand("subagent-preset", { description: "Switch named agents' model preset", handler: selectPreset });
+  const manageAgents = {
+    description: "Configure named agents or inspect, message, and cancel durable jobs",
+    handler: async (args: string, ctx: ExtensionContext) => {
+      if (!ctx.hasUI) return;
+      if (args.trim() === "configure") return configureAgents(ctx);
+      if (args.trim().startsWith("preset")) return selectPreset(args.trim().slice(6), ctx);
+      if (ctx.mode === "tui") {
+        let initialId = args.trim() || undefined;
+        while (true) {
+          const action = await showAgents(ctx, jobs, initialId);
+          initialId = undefined;
+          if (!action) return;
+          if (action === "configure") await configureAgents(ctx);
+          else await selectPreset("", ctx);
+        }
+      }
+      // RPC clients support native dialogs, not custom terminal screens.
+      const entries = jobs ? await jobs.list() : [];
+      const choices = ["Configure agents", "Switch preset", ...entries.map((job) => `${job.name ?? job.id} · ${job.agent} [${job.status}] ${(job.title ?? job.task).slice(0, 80)}`)];
+      const selected = await ctx.ui.select("Agents", choices);
+      if (!selected) return;
+      if (selected === choices[0]) return configureAgents(ctx);
+      if (selected === choices[1]) return selectPreset("", ctx);
+      const id = selected.split(" · ")[0];
+      const result = await getJobs().result(id);
+      const messageAction = result.job.status === "waiting" ? "Answer question" : "Message";
+      const action = await ctx.ui.select(`${result.job.name ?? result.job.agent} [${result.job.status}]`, ["View output", messageAction, "Cancel", "Close"]);
+      if (action === "View output") await ctx.ui.editor("Agent output, edits are discarded", formatResult(result));
+      if (action === "Cancel") await getJobs().cancel(id);
+      if (action === messageAction) {
+        const task = await ctx.ui.input(result.job.question?.text ?? "Message agent", "Answer, guidance, or follow-up");
+        if (task?.trim()) await getJobs().message(id, task);
+      }
+    },
+  };
+  pi.registerCommand("agents", manageAgents);
+  pi.registerCommand("subagents", manageAgents);
+  pi.registerCommand("commit", {
+    description: "Create intentional commits with the commit agent",
+    handler: async (args, ctx) => {
+      if (!ctx.isIdle()) { ctx.ui.notify("Agent is busy", "warning"); return; }
+      const task = args.trim() || "Analyze completed work and create the appropriate commits.";
+      const startedAt = Date.now();
+      let progress: { content: { text: string }[]; details: { job: Job } } | undefined;
+      const showProgress = () => ctx.ui.setWidget("commit", (_tui, theme) => {
+        const box = new Box(1, 1, (text) => theme.bg("toolPendingBg", text));
+        box.addChild({
+          invalidate() {},
+          render(width) {
+            return [
+              theme.fg("toolTitle", theme.bold(`Commit · ${elapsed(startedAt)} · ${progress ? `${progress.details.job.model}:${progress.details.job.thinking}` : "Preparing agent"}`)),
+              theme.fg("dim", terminalText(task).replace(/\s+/g, " ")),
+              ...(progress ? terminalText(progress.content[0].text).split("\n").slice(-6) : ["Loading instructions and skills…"]).map((line) => theme.fg("toolOutput", line)),
+              theme.fg("dim", "esc cancel"),
+            ].map((line) => truncateToWidth(line, width));
+          },
+        });
+        return box;
       });
-      return { content: [{ type: "text", text: `Started ${snapshot.name} (${snapshot.id}) “${snapshot.title}” in ${cwd}.` }], details: { id: snapshot.id, name: snapshot.name, status: snapshot.status, sessionMode: snapshot.sessionMode } };
-    },
-    renderCall(args, theme) {
-      const name = typeof args.name === "string" && args.name.trim() ? args.name.trim() : "subagent";
-      let text = `${theme.fg("toolTitle", theme.bold("spawn subagent "))}${theme.fg("accent", name)}`;
-      if (args.model) text += `\n${theme.fg("dim", `${args.model}:${args.thinking ?? "?"}`)}`;
-      else if (typeof args.route === "string") text += `\n${theme.fg("dim", `route: ${args.route}`)}`;
-      if (args.task) text += `\n${theme.fg("muted", args.task)}`;
-      return new Text(text, 0, 0);
-    },
-  });
-
-  pi.registerTool({
-    name: "subagent_profiles", label: "List Subagent Profiles",
-    description: "List available declarative background-agent profiles and any profile errors.", parameters: Type.Object({}),
-    async execute(_id, _params, _signal, _update, ctx) {
-      const discovery = discoverSubagentProfiles({ agentDir: getAgentDir(), cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted() });
-      const profiles = discovery.profiles.map((profile) =>
-        `${profile.name} [${profile.source}] ${profile.description || "(no description)"} · ${profile.route ? `route ${profile.route}` : profile.model ? `${profile.model}:${profile.thinking}` : "model required at spawn"} · ${profile.mutating ? "mutating" : "read-only"} · ${profile.sessionMode}`);
-      const errors = discovery.errors.map((item) => `ERROR ${item.path}: ${item.error}`);
-      return { content: [{ type: "text", text: [...profiles, ...errors].join("\n") || "No subagent profiles." }], details: discovery };
-    },
-  });
-
-  pi.registerTool({
-    name: "subagent_message", label: "Message Subagent",
-    description: "Send guidance to a tracked subagent by its stable name, answer a waiting question, or continue a settled child session.",
-    parameters: Type.Object({
-      name: Type.String({ minLength: 1, description: "Exact stable subagent name" }),
-      message: Type.String({ minLength: 1, description: "Guidance, answer, or continuation prompt" }),
-    }),
-    async execute(_id, params) {
-      const manager = getManager();
-      const snapshot = manager.resolve(params.name);
-      if (!snapshot || snapshot.name !== params.name || snapshot.origin === "btw") {
-        const names = manager.list().filter((entry) => entry.origin !== "btw").map((entry) => entry.name);
-        throw new Error(`Unknown subagent name "${params.name}".${names.length ? ` Known names: ${names.join(", ")}.` : ""}`);
-      }
-      if (!params.message.trim()) throw new Error("Message must not be empty.");
-      const question = snapshot.status === "waiting" ? snapshot.question?.text : undefined;
-      await manager.send(snapshot.id, params.message);
-      return {
-        content: [{ type: "text", text: `Message sent to ${snapshot.name} (${snapshot.id}).` }],
-        details: { id: snapshot.id, name: snapshot.name, question, message: params.message, status: snapshot.status, sessionMode: snapshot.sessionMode },
-      };
-    },
-    renderResult(result, _options, theme) {
-      const details = result.details as { name: string; question?: string; message: string } | undefined;
-      if (!details) return undefined;
-      const text = details.question
-        ? `Question from ${details.name}:\n${details.question}\n\nAnswer:\n${details.message}`
-        : `Message to ${details.name}:\n${details.message}`;
-      return new Text(theme.fg("toolOutput", text), 0, 0);
-    },
-  });
-
-  pi.registerTool({
-    name: "subagent_wait", label: "Wait for Subagents", description: "Wait for background subagents and return their results.",
-    parameters: Type.Object({ ids: Type.Array(Type.String(), { maxItems: 64 }) }),
-    async execute(_id, params, signal, onUpdate) {
-      const ids = [...new Set(params.ids)];
-      if (!ids.length) throw new Error("Provide at least one subagent id.");
-      if (ids.some((id) => getManager().resolve(id)?.origin === "btw")) throw new Error("By-the-way sessions are only available through the TUI.");
-      const emit = () => {
-        const entries = ids.map((id) => getManager().resolve(id)).filter((entry): entry is SubagentSnapshot => Boolean(entry));
-        onUpdate?.({ content: [{ type: "text", text: formatWaitingSubagents(entries) }], details: { pending: ids } });
-      };
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const unsubscribeWait = onUpdate ? getManager().subscribe(() => {
-        if (!timer) timer = setTimeout(() => { timer = undefined; emit(); }, 150);
-      }) : undefined;
-      emit();
-      let snapshots: SubagentSnapshot[];
+      showProgress();
+      const timer = setInterval(showProgress, 1000);
+      const controller = new AbortController();
+      const stop = ctx.ui.onTerminalInput?.((data) => {
+        if (matchesKey(data, Key.escape)) { controller.abort(); return { consume: true }; }
+      });
       try {
-        snapshots = await getManager().wait(ids, signal);
-      } finally {
-        unsubscribeWait?.();
-        if (timer) clearTimeout(timer);
+        const result = await run("commit", task, ctx, undefined, false, controller.signal,
+          (update) => { progress = update; showProgress(); });
+        pi.sendMessage({ customType: result.details.job.status === "waiting" ? "agent-question" : "agent-result", content: result.content, details: result.details, display: true });
+      } catch (error) {
+        const text = controller.signal.aborted ? "Commit agent cancelled" : `Commit agent failed: ${String(error)}`;
+        let result: JobResult | undefined;
+        if (progress?.details.job.id && jobs) {
+          try { if (controller.signal.aborted) await jobs.cancel(progress.details.job.id); result = await jobs.result(progress.details.job.id); } catch { /* Setup may have failed before a job was stored. */ }
+        }
+        pi.sendMessage({ customType: "agent-result", content: result ? formatResult(result) : `${text}\n\nTask: ${task}`, details: result, display: true });
+        ctx.ui.notify(text, controller.signal.aborted ? "info" : "error");
       }
-      for (const snapshot of snapshots) { getManager().consume(snapshot.id); pendingResults.delete(snapshot.id); }
-      const combined = snapshots.map((snapshot) => `## ${snapshot.name} (${snapshot.id}) “${snapshot.title}” — ${snapshot.status}\n${formatSubagentUsage(snapshot)}\n${snapshot.error ? `Error: ${snapshot.error}\n` : ""}${truncateSubagentOutput(snapshot.output || "(no output)", 200, 16 * 1024, "[output truncated]", snapshot.sessionFile).output}`).join("\n\n---\n\n");
-      const text = truncateSubagentOutput(combined, 800, 64 * 1024, "[combined subagent output truncated]").output;
-      return { content: [{ type: "text", text }], details: { results: snapshots.map(({ id, status }) => ({ id, status })) } };
+      finally { clearInterval(timer); stop?.(); ctx.ui.setWidget("commit", undefined); }
     },
   });
-
-  pi.registerTool({
-    name: "subagent_cancel", label: "Cancel Subagents", description: "Cancel running background subagents.",
-    parameters: Type.Object({ ids: Type.Array(Type.String()) }),
-    async execute(_id, params) {
-      if (params.ids.some((id) => getManager().resolve(id)?.origin === "btw")) throw new Error("By-the-way sessions are only available through the TUI.");
-      const snapshots = await getManager().cancel([...new Set(params.ids)]);
-      for (const snapshot of snapshots) pendingResults.delete(snapshot.id);
-      return { content: [{ type: "text", text: snapshots.map((snapshot) => `${snapshot.id}: ${snapshot.status}`).join("\n") }], details: { results: snapshots.map(({ id, status }) => ({ id, status })) } };
-    },
-  });
-
-  pi.registerTool({
-    name: "subagent_check", label: "Check Subagent", description: "Check one subagent's status and recent output.",
-    parameters: Type.Object({ id: Type.String() }),
-    async execute(_id, params) {
-      const snapshot = getManager().resolve(params.id);
-      if (!snapshot || snapshot.origin === "btw") throw new Error(`Unknown subagent id "${params.id}".`);
-      const preview = (snapshot.liveText || snapshot.output || "(no output yet)").slice(-2048);
-      return { content: [{ type: "text", text: `${snapshot.name} (${snapshot.id}) [${snapshot.status}] “${snapshot.title}”\n${formatSubagentUsage(snapshot)}\n${preview}` }], details: { id: snapshot.id, name: snapshot.name, status: snapshot.status, sessionMode: snapshot.sessionMode } };
-    },
-  });
-
-  pi.registerTool({
-    name: "subagent_list", label: "List Subagents", description: "List tracked model-facing subagents.", parameters: Type.Object({}),
-    async execute() {
-      const entries = getManager().list().filter((entry) => entry.origin !== "btw");
-      return { content: [{ type: "text", text: entries.length ? entries.map((entry) => `${entry.name} (${entry.id}) [${entry.status}] “${entry.title}” (${entry.model}:${entry.thinking}, ${entry.sessionMode}, ${entry.cwd})`).join("\n") : "No subagents." }], details: { subagents: entries.map(({ id, name, title, status, origin, sessionMode }) => ({ id, name, title, status, origin, sessionMode })) } };
-    },
-  });
-
-  pi.registerMessageRenderer("subagent-result", (message) => {
-    const content = typeof message.content === "string" ? message.content : "";
-    const box = new Box(1, 0);
-    box.addChild(new Markdown(content, 0, 0, getMarkdownTheme()));
-    return box;
-  });
-  pi.registerMessageRenderer("subagent-question", (message, _options, theme) => {
-    const content = typeof message.content === "string" ? message.content : "";
-    const box = new Box(1, 0);
-    box.addChild(new Text(theme.fg("warning", content), 0, 0));
-    return box;
-  });
-  pi.registerEntryRenderer("btw-result", (entry, { expanded }, theme) => {
-    const data = entry.data as any;
-    const text = `${theme.fg(data.status === "done" ? "success" : "error", "■")} ${theme.bold(`by the way · ${data.title}`)}\n${data.error ? `Error: ${data.error}\n` : ""}${data.answer ?? "(no answer)"}`;
-    return expanded ? new Markdown(text, 0, 0, getMarkdownTheme()) : new Text(text.split("\n").slice(0, 9).join("\n"), 0, 0);
-  });
-
-  pi.registerCommand("subagents", {
-    description: "List, inspect, continue, and abort subagents",
-    handler: async (args, ctx) => {
-      const entries = getManager().list();
-      if (ctx.mode !== "tui") {
-        ctx.ui.notify(entries.length ? entries.map((entry) => `${entry.id} [${entry.status}] ${entry.title}`).join("\n") : "No subagents.", "info");
-        return;
-      }
-      await showSubagents(ctx, getManager(), args.trim() || undefined);
-      for (const entry of getManager().list()) if (!isPendingSubagentStatus(entry.status)) acknowledged.add(entry.id);
-      updateStatus();
-    },
-  });
-
-  pi.registerCommand("btw", {
-    description: "Ask a one-off side question outside parent model context",
-    handler: async (args, ctx) => {
-      if (ctx.mode !== "tui") { ctx.ui.notify("/btw is only available in TUI mode", "warning"); return; }
-      const task = args.trim() || (await ctx.ui.input("By the way", "Ask a side question…"))?.trim();
-      if (!task) return;
-      const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
-      if (!model) { ctx.ui.notify("No active model", "error"); return; }
-      const snapshot = await getManager().spawn({
-        origin: "btw", name: "btw", title: task.split(/\s+/).slice(0, 8).join(" "), task, cwd: ctx.cwd,
-        model, thinking: pi.getThinkingLevel(), sessionMode: "standalone", mutating: false,
-        config: { name: "By the way", prompt: "Answer the user's one-off side question concisely. Do not modify files.", timeoutMs: 30 * 60_000, tools: "read,grep,find,ls", inheritResources: false },
-      });
-      await showTakeover(ctx, getManager(), snapshot.id);
-    },
-  });
-
-  pi.registerCommand("subagent-preset", {
-    description: "Switch the model preset used by scout, review, and commit",
-    handler: async (args, ctx) => {
-      const names = getSubagentPresetNames();
-      if (names.length === 0) {
-        ctx.ui.notify("No subagent presets configured", "warning");
-        return;
-      }
-
-      const requested = args.trim();
-      const name = requested || await ctx.ui.select(
-        `Subagent preset (current: ${getActiveSubagentPresetName() ?? "none"})`,
-        names,
-      );
-      if (!name) return;
-      if (!names.includes(name)) {
-        ctx.ui.notify(`Unknown subagent preset "${name}". Available: ${names.join(", ")}`, "error");
-        return;
-      }
-
-      setSubagentPreset(name);
-      ctx.ui.notify(`Subagent preset "${name}" activated`, "info");
-    },
-  });
-
 }

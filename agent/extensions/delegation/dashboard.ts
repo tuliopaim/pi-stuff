@@ -1,306 +1,229 @@
-import type { ExtensionCommandContext, KeybindingsManager } from "@earendil-works/pi-coding-agent";
-import { Input, Markdown, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type Focusable, type MarkdownTheme, type TUI } from "@earendil-works/pi-tui";
-import type { SubagentManager } from "./manager.ts";
-import { isPendingSubagentStatus, type SubagentSnapshot } from "./domain.ts";
-import type { TranscriptEntry } from "../workflows/model.ts";
-import { formatContextUtilization } from "../shared/context-utilization.ts";
-import { sanitizeTerminalText } from "./presentation.ts";
-export { sanitizeTerminalText } from "./presentation.ts";
+import { getMarkdownTheme, type ExtensionContext, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
+import type { Message } from "@earendil-works/pi-ai";
+import { Input, Markdown, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type Focusable, type TUI } from "@earendil-works/pi-tui";
+import type { AgentJobs, Job, JobMetadata } from "./durable.ts";
+import { getActiveSubagentPresetName, getAgents } from "./config.ts";
+import { activeJob, elapsed, jobActivity, jobColor as color, jobSummary, jobTitle, pendingJob, terminalText, toolSummary } from "./presentation.ts";
 
-type Theme = ExtensionCommandContext["ui"]["theme"];
+type Theme = ExtensionContext["ui"]["theme"];
+type Action = "configure" | "preset" | undefined;
+const pad = (text: string, width: number) => {
+  const clipped = truncateToWidth(text, width, "");
+  return clipped + " ".repeat(Math.max(0, width - visibleWidth(clipped)));
+};
+const clock = (time?: number) => time === undefined ? "--:--:--" : new Date(time).toLocaleTimeString("en-GB", { hour12: false });
 
-function elapsed(snapshot: SubagentSnapshot) {
-  const seconds = Math.max(0, Math.round(((snapshot.settledAt ?? Date.now()) - snapshot.createdAt) / 1000));
-  return seconds >= 60 ? `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s` : `${seconds}s`;
-}
-
-function clock(timestamp: number) {
-  if (!Number.isFinite(timestamp)) return "--:--:--";
-  const date = new Date(timestamp);
-  return [date.getHours(), date.getMinutes(), date.getSeconds()].map((part) => String(part).padStart(2, "0")).join(":");
-}
-
-function fullTimestamp(timestamp: number) {
-  if (!Number.isFinite(timestamp)) return "unknown";
-  const date = new Date(timestamp);
-  const day = [date.getFullYear(), date.getMonth() + 1, date.getDate()].map((part, index) => String(part).padStart(index ? 2 : 4, "0")).join("-");
-  return `${day} ${clock(timestamp)}`;
-}
-
-function padVisible(text: string, width: number) {
-  const truncated = truncateToWidth(text, width, "");
-  return truncated + " ".repeat(Math.max(0, width - visibleWidth(truncated)));
-}
-
-interface TimelineWindow { start: number; end: number }
-
-function timelineWindow(entries: readonly SubagentSnapshot[], now: number): TimelineWindow {
-  const starts = entries.map((entry) => entry.createdAt).filter(Number.isFinite);
-  const ends = entries.map((entry) => entry.settledAt ?? now).filter(Number.isFinite);
-  const start = starts.length ? Math.min(...starts) : now;
-  return { start, end: Math.max(start + 1, ...(ends.length ? ends : [now])) };
-}
-
-export function renderTimelineBar(snapshot: Pick<SubagentSnapshot, "createdAt" | "settledAt" | "status">, window: TimelineWindow, width: number) {
-  const size = Math.max(3, width);
-  const span = Math.max(1, window.end - window.start);
-  const position = (timestamp: number) => Math.max(0, Math.min(size - 1, Math.round(((timestamp - window.start) / span) * (size - 1))));
-  const start = position(snapshot.createdAt);
-  const end = Math.max(start, position(snapshot.settledAt ?? window.end));
-  const cells = Array.from({ length: size }, () => " ");
-  if (start === end) cells[start] = isPendingSubagentStatus(snapshot.status) ? "▶" : "◆";
-  else {
-    cells[start] = "├";
-    for (let index = start + 1; index < end; index++) cells[index] = "━";
-    cells[end] = isPendingSubagentStatus(snapshot.status) ? "▶" : "┤";
-  }
+export function timelineBar(job: Job, start: number, end: number, width: number) {
+  const cells = Array<string>(Math.max(3, width)).fill(" ");
+  const position = (time: number) => Math.max(0, Math.min(cells.length - 1, Math.round((time - start) / Math.max(1, end - start) * (cells.length - 1))));
+  const first = position(job.startedAt), last = Math.max(first, position(job.finishedAt ?? end));
+  cells[first] = first === last ? "◆" : "├";
+  for (let i = first + 1; i < last; i++) cells[i] = "━";
+  cells[last] = pendingJob(job) ? "▶" : first === last ? "◆" : "┤";
   return cells.join("");
 }
 
-function square(snapshot: SubagentSnapshot, theme: Theme) {
-  return theme.fg(snapshot.status === "done" ? "success" : snapshot.status === "running" || snapshot.status === "waiting" ? "warning" : "error", "■");
-}
-
-export interface DashboardSelection { id?: string; index: number }
-export function reconcileDashboardSelection(selection: DashboardSelection, entries: ReadonlyArray<Pick<SubagentSnapshot, "id">>) {
-  const stable = selection.id ? entries.findIndex((entry) => entry.id === selection.id) : -1;
-  selection.index = stable >= 0 ? stable : Math.min(Math.max(0, selection.index), Math.max(0, entries.length - 1));
-  selection.id = entries[selection.index]?.id;
-}
-
-class Dashboard implements Component {
-  private selection: DashboardSelection = { index: 0 };
-  private unsubscribe: () => void;
-  private timer: ReturnType<typeof setInterval>;
-  private tui: TUI;
-  private theme: Theme;
-  private keys: KeybindingsManager;
-  private manager: SubagentManager;
-  private done: (id: string | null) => void;
-  constructor(tui: TUI, theme: Theme, keys: KeybindingsManager, manager: SubagentManager, done: (id: string | null) => void) {
-    this.tui = tui; this.theme = theme; this.keys = keys; this.manager = manager; this.done = done;
-    this.unsubscribe = manager.subscribe(() => tui.requestRender());
-    this.timer = setInterval(() => tui.requestRender(), 1000);
-  }
-  dispose() { this.unsubscribe(); clearInterval(this.timer); }
-  invalidate() {}
-  handleInput(data: string) {
-    const entries = this.manager.list();
-    reconcileDashboardSelection(this.selection, entries);
-    if (this.keys.matches(data, "tui.select.cancel") || this.keys.matches(data, "tui.editor.cursorLeft") || data === "h") return this.done(null);
-    if (this.keys.matches(data, "tui.select.confirm") || this.keys.matches(data, "tui.editor.cursorRight") || data === "l") return this.done(entries[this.selection.index]?.id ?? null);
-    if (this.keys.matches(data, "tui.select.up") || data === "k") this.selection.index = (this.selection.index - 1 + entries.length) % Math.max(1, entries.length);
-    if (this.keys.matches(data, "tui.select.down") || data === "j") this.selection.index = (this.selection.index + 1) % Math.max(1, entries.length);
-    if (data === "g") this.selection.index = 0;
-    if (data === "G") this.selection.index = Math.max(0, entries.length - 1);
-    if (data === "x") { const selected = entries[this.selection.index]; if (selected && isPendingSubagentStatus(selected.status)) void this.manager.cancel([selected.id]); }
-    this.selection.id = entries[this.selection.index]?.id;
-    this.tui.requestRender();
-  }
-  render(width: number) {
-    const entries = this.manager.list();
-    reconcileDashboardSelection(this.selection, entries);
-    const height = Math.max(6, (this.tui.terminal.rows || 30) - 5);
-    const now = Date.now();
-    const window = timelineWindow(entries, now);
-    const wide = width >= 96;
-    const capacity = wide ? height : Math.max(3, Math.floor(height / 2));
-    const start = Math.max(0, Math.min(this.selection.index - Math.floor(capacity / 2), entries.length - capacity));
-    const timelineWidth = Math.max(18, Math.min(32, Math.floor(width * 0.24)));
-    const titleWidth = Math.max(18, width - timelineWidth - 38);
-    const timelineHeading = `${clock(window.start)}${" ".repeat(Math.max(1, timelineWidth - 16))}${clock(window.end)}`;
-    const lines = [
-      this.theme.bold(this.theme.fg("accent", `Subagents · ${entries.length}`)),
-      wide
-        ? this.theme.fg("dim", `${padVisible("  AGENT", titleWidth + 4)}START     END       DUR     ${padVisible(timelineHeading, timelineWidth)}`)
-        : this.theme.fg("dim", "  AGENT · START → END · DURATION"),
-      this.theme.fg("border", "─".repeat(width)),
-    ];
-    for (const [offset, entry] of entries.slice(start, start + capacity).entries()) {
-      const marker = start + offset === this.selection.index ? this.theme.fg("accent", "❯") : " ";
-      const context = formatContextUtilization({ tokens: entry.usage.contextTokens, contextWindow: entry.usage.contextWindow }) || `${entry.usage.contextTokens} tok`;
-      const ended = entry.settledAt ? clock(entry.settledAt) : "running ";
-      if (wide) {
-        const identity = padVisible(`${marker} ${square(entry, this.theme)} ${sanitizeTerminalText(entry.title)}`, titleWidth + 4);
-        const color = entry.status === "done" ? "success" : entry.status === "running" || entry.status === "waiting" ? "warning" : "error";
-        const bar = this.theme.fg(color, renderTimelineBar(entry, window, timelineWidth));
-        lines.push(truncateToWidth(`${identity}${clock(entry.createdAt)}  ${ended}  ${padVisible(elapsed(entry), 7)} ${bar}`, width));
-      } else {
-        lines.push(truncateToWidth(`${marker} ${square(entry, this.theme)} ${sanitizeTerminalText(entry.title)} ${this.theme.fg("dim", `· ${elapsed(entry)}`)}`, width));
-        lines.push(truncateToWidth(this.theme.fg("dim", `    ${clock(entry.createdAt)} → ${ended.trim()} · ${entry.id} · ${entry.model}:${entry.thinking} · ${context}`), width));
-      }
-    }
-    while (lines.length < height + 3) lines.push("");
-    lines.push(this.theme.fg("dim", "j/k select · g/G first/last · l/enter inspect · h/esc close · x abort"));
-    return lines.map((line) => truncateToWidth(line, width));
-  }
-}
-
-function toolSummary(entry: TranscriptEntry) {
-  const name = sanitizeTerminalText(entry.name ?? "tool");
-  try {
-    const args = JSON.parse(entry.text) as Record<string, unknown>;
-    const detail = ["path", "query", "command", "task", "url"]
-      .map((key) => args[key])
-      .find((value) => typeof value === "string");
-    return detail ? `${name}  ${sanitizeTerminalText(String(detail)).replace(/\s+/g, " ")}` : name;
-  } catch {
-    return `${name}  ${sanitizeTerminalText(entry.text).replace(/\s+/g, " ")}`.trim();
-  }
-}
-
-function previewLines(text: string, limit: number) {
-  const all = sanitizeTerminalText(text).split("\n").map((line) => line.trimEnd()).filter(Boolean);
-  const shown = all.slice(0, limit);
-  if (all.length > limit) shown.push(`… ${all.length - limit} more line${all.length - limit === 1 ? "" : "s"}`);
-  return shown;
-}
-
-function transcriptMarkdownTheme(theme: Theme): MarkdownTheme {
-  return {
-    heading: (text) => theme.fg("mdHeading", text),
-    link: (text) => theme.fg("mdLink", text),
-    linkUrl: (text) => theme.fg("mdLinkUrl", text),
-    code: (text) => theme.fg("mdCode", text),
-    codeBlock: (text) => theme.fg("mdCodeBlock", text),
-    codeBlockBorder: (text) => theme.fg("mdCodeBlockBorder", text),
-    quote: (text) => theme.fg("mdQuote", text),
-    quoteBorder: (text) => theme.fg("mdQuoteBorder", text),
-    hr: (text) => theme.fg("mdHr", text),
-    listBullet: (text) => theme.fg("mdListBullet", text),
-    bold: (text) => theme.bold(text),
-    italic: (text) => theme.italic(text),
-    underline: (text) => theme.underline(text),
-    strikethrough: (text) => theme.strikethrough(text),
-    highlightCode: (code) => code.split("\n").map((line) => theme.fg("mdCodeBlock", line)),
-  };
-}
-
-function transcriptLines(snapshot: SubagentSnapshot, width: number, theme: Theme) {
-  const lines: string[] = [];
-  const markdownTheme = transcriptMarkdownTheme(theme);
-  for (const entry of snapshot.transcript) {
-    if (entry.role === "assistant") {
-      lines.push(...new Markdown(sanitizeTerminalText(entry.text), 2, 0, markdownTheme).render(width));
-      lines.push("");
-    } else if (entry.role === "user") {
-      lines.push(theme.fg("accent", theme.bold("Task")));
-      lines.push(...wrapTextWithAnsi(theme.fg("text", sanitizeTerminalText(entry.text)), Math.max(10, width - 2)).map((line) => `  ${line}`));
-      lines.push("");
-    } else if (entry.role === "thinking") {
-      const thought = previewLines(entry.text, 1)[0];
-      if (thought) lines.push(truncateToWidth(theme.fg("dim", `  Thinking · ${thought}`), width));
-    } else if (entry.role === "tool") {
-      lines.push(truncateToWidth(`${theme.fg("warning", "›")} ${theme.fg("toolTitle", toolSummary(entry))}`, width));
-    } else if (entry.isError) {
-      for (const line of previewLines(entry.text, 4)) lines.push(truncateToWidth(theme.fg("error", `  │ ${line}`), width));
-    } else {
-      for (const line of previewLines(entry.text, 2)) lines.push(truncateToWidth(theme.fg("dim", `  │ ${line}`), width));
-      lines.push("");
-    }
-  }
-  if (snapshot.liveThinking) {
-    const thought = previewLines(snapshot.liveThinking, 1).at(-1);
-    lines.push(truncateToWidth(theme.fg("dim", `  Thinking…${thought ? ` ${thought}` : ""}`), width));
-  }
-  if (snapshot.liveText) lines.push(...new Markdown(sanitizeTerminalText(snapshot.liveText), 2, 0, markdownTheme).render(width));
-  for (const queued of snapshot.queued) lines.push(theme.fg("warning", `  Guidance queued · ${sanitizeTerminalText(queued.text)}`));
-  if (snapshot.error) lines.push(...wrapTextWithAnsi(theme.fg("error", `  ${sanitizeTerminalText(snapshot.error)}`), width));
-  return lines;
-}
-
-export class Takeover implements Component, Focusable {
-  private input = new Input();
-  private unsubscribe: () => void;
-  private timer: ReturnType<typeof setInterval>;
-  private renderTimer?: ReturnType<typeof setTimeout>;
+export class Dashboard implements Component, Focusable {
+  private entries: Job[] = [];
+  private selectedId?: string;
+  private index = 0;
+  private detailId?: string;
+  private messages: Message[] = [];
+  private metadata?: JobMetadata;
+  private metadataId?: string;
+  private historyLimit = 100;
   private offset = 0;
+  private input = new Input();
+  private inputMode = false;
   private _focused = false;
+  private error?: string;
+  private closed = false;
+  private refreshing = false;
+  private refreshAgain = false;
+  private refreshTimer?: ReturnType<typeof setTimeout>;
+  private timer: ReturnType<typeof setInterval>;
+  private unsubscribe?: () => void;
   private tui: TUI;
   private theme: Theme;
   private keys: KeybindingsManager;
-  private manager: SubagentManager;
-  private id: string;
-  private done: () => void;
-  private sendError?: string;
-  private inputMode = false;
+  private jobs?: AgentJobs;
+  private done: (action: Action) => void;
+
   get focused() { return this._focused; }
   set focused(value: boolean) { this._focused = value; this.input.focused = value && this.inputMode; }
-  constructor(tui: TUI, theme: Theme, keys: KeybindingsManager, manager: SubagentManager, id: string, done: () => void) {
-    this.tui = tui; this.theme = theme; this.keys = keys; this.manager = manager; this.id = id; this.done = done;
-    this.unsubscribe = manager.subscribeTo(id, () => {
-      if (!this.renderTimer) this.renderTimer = setTimeout(() => { this.renderTimer = undefined; tui.requestRender(); }, 50);
-    });
-    this.timer = setInterval(() => tui.requestRender(), 1000);
+
+  constructor(tui: TUI, theme: Theme, keys: KeybindingsManager, jobs: AgentJobs | undefined, done: (action: Action) => void, initialId?: string) {
+    this.tui = tui; this.theme = theme; this.keys = keys; this.jobs = jobs; this.done = done;
+    this.detailId = initialId;
+    this.unsubscribe = jobs?.subscribe(() => this.scheduleRefresh());
+    this.timer = setInterval(() => { this.scheduleRefresh(); tui.requestRender(); }, 1000);
     this.input.onSubmit = (value) => {
       const text = value.trim();
-      if (!text) return;
-      this.input.setValue(""); this.inputMode = false; this.input.focused = false; this.offset = 0; this.sendError = undefined;
-      void manager.send(id, text).catch((error) => { this.sendError = error instanceof Error ? error.message : String(error); this.tui.requestRender(); });
+      if (!text || !this.detailId || !jobs) return;
+      this.input.setValue(""); this.inputMode = false; this.input.focused = false; this.offset = 0;
+      this.perform(() => jobs.message(this.detailId!, text));
     };
+    void this.refresh();
   }
-  dispose() { this.unsubscribe(); clearInterval(this.timer); if (this.renderTimer) clearTimeout(this.renderTimer); }
+
+  dispose() { this.closed = true; this.unsubscribe?.(); clearInterval(this.timer); if (this.refreshTimer) clearTimeout(this.refreshTimer); }
   invalidate() { this.input.invalidate(); }
-  handleInput(data: string) {
-    if (this.keys.matches(data, "app.clear") || data === "x") { const snapshot = this.manager.get(this.id); if (snapshot && isPendingSubagentStatus(snapshot.status)) void this.manager.cancel([this.id]); return; }
-    if (this.inputMode) {
-      if (this.keys.matches(data, "tui.select.cancel")) { this.inputMode = false; this.input.focused = false; this.tui.requestRender(); return; }
-      this.input.handleInput(data); this.tui.requestRender(); return;
-    }
-    if (this.keys.matches(data, "tui.select.cancel") || this.keys.matches(data, "app.interrupt") || this.keys.matches(data, "tui.editor.cursorLeft") || data === "h") return this.done();
-    if (this.keys.matches(data, "tui.select.confirm") || data === "i") {
-      this.inputMode = true; this.input.focused = this._focused; this.tui.requestRender(); return;
-    }
-    if (this.keys.matches(data, "tui.editor.cursorUp") || data === "k") { this.offset += 6; this.tui.requestRender(); return; }
-    if (this.keys.matches(data, "tui.editor.cursorDown") || data === "j") { this.offset = Math.max(0, this.offset - 6); this.tui.requestRender(); return; }
-    if (this.keys.matches(data, "tui.editor.pageUp")) { this.offset += this.viewportHeight(); this.tui.requestRender(); return; }
-    if (this.keys.matches(data, "tui.editor.pageDown")) { this.offset = Math.max(0, this.offset - this.viewportHeight()); this.tui.requestRender(); return; }
-    if (data === "g") { this.offset = Number.MAX_SAFE_INTEGER; this.tui.requestRender(); return; }
-    if (data === "G") { this.offset = 0; this.tui.requestRender(); return; }
-    if (data.length === 1 && data >= " ") { this.inputMode = true; this.input.focused = this._focused; this.input.handleInput(data); this.tui.requestRender(); }
+  private scheduleRefresh() {
+    if (this.closed || this.refreshTimer) return;
+    this.refreshTimer = setTimeout(() => { this.refreshTimer = undefined; void this.refresh(); }, 100);
   }
-  private viewportHeight() { return Math.max(6, (this.tui.terminal.rows || 30) - (this.inputMode ? 9 : 7) - (this.sendError ? 1 : 0)); }
+  private async refresh() {
+    if (this.closed) return;
+    if (this.refreshing) { this.refreshAgain = true; return; }
+    this.refreshing = true;
+    try {
+      const entries = [...(await this.jobs?.list() ?? [])].sort((a, b) => (b.createdAt ?? b.startedAt) - (a.createdAt ?? a.startedAt));
+      if (this.closed) return;
+      this.entries = entries;
+      const stable = entries.findIndex((job) => job.id === this.selectedId);
+      this.index = stable >= 0 ? stable : Math.min(this.index, Math.max(0, entries.length - 1));
+      this.selectedId = entries[this.index]?.id;
+      const detail = this.detailId;
+      const id = detail ?? this.selectedId;
+      if (id && this.jobs) {
+        const resolved = entries.find((entry) => entry.id === id || entry.name === id);
+        const canonical = resolved?.id ?? id;
+        const [messages, metadata] = await Promise.all([detail ? this.jobs.transcript(canonical, this.historyLimit) : undefined, this.jobs.metadata?.(canonical)]);
+        if (!this.closed && (this.detailId ?? this.selectedId) === id) {
+          if (detail) { this.detailId = canonical; this.messages = messages ?? []; }
+          this.metadata = metadata; this.metadataId = canonical;
+        }
+      }
+    } catch (error) { this.error = String(error); }
+    finally {
+      this.refreshing = false;
+      if (!this.closed) this.tui.requestRender();
+      if (this.refreshAgain) { this.refreshAgain = false; this.scheduleRefresh(); }
+    }
+  }
+  private perform(operation: () => Promise<unknown>) {
+    this.error = undefined;
+    void operation().catch((error) => { this.error = String(error); }).finally(() => this.scheduleRefresh());
+    this.tui.requestRender();
+  }
+
+  handleInput(data: string) {
+    const matches = (key: Parameters<KeybindingsManager["matches"]>[1]) => this.keys.matches(data, key);
+    if (this.inputMode) {
+      if (matches("tui.select.cancel")) { this.inputMode = false; this.input.focused = false; }
+      else this.input.handleInput(data);
+      this.tui.requestRender(); return;
+    }
+    if (matches("tui.select.cancel") || matches("tui.editor.cursorLeft") || data === "h") {
+      if (!this.detailId) return this.done(undefined);
+      this.detailId = undefined; this.messages = []; this.metadata = undefined; this.historyLimit = 100; this.error = undefined;
+    } else if (!this.detailId && (data === "c" || data === "p")) return this.done(data === "c" ? "configure" : "preset");
+    else if (data === "x") {
+      const job = this.entries.find((job) => job.id === (this.detailId ?? this.selectedId));
+      if (job && pendingJob(job) && this.jobs) this.perform(() => this.jobs!.cancel(job.id));
+    } else if (this.detailId) {
+      if (data === "i" || matches("tui.select.confirm")) { this.inputMode = true; this.input.focused = this.focused; }
+      else if (data === "k" || matches("tui.select.up")) this.offset += 6;
+      else if (data === "j" || matches("tui.select.down")) this.offset = Math.max(0, this.offset - 6);
+      else if (matches("tui.editor.pageUp")) this.offset += this.height();
+      else if (matches("tui.editor.pageDown")) this.offset = Math.max(0, this.offset - this.height());
+      else if (data === "g") this.offset = Number.MAX_SAFE_INTEGER;
+      else if (data === "G") this.offset = 0;
+      else if (data === "o") { this.historyLimit += 100; this.scheduleRefresh(); }
+    } else {
+      if (matches("tui.select.confirm") || matches("tui.editor.cursorRight") || data === "l") {
+        this.detailId = this.selectedId; this.offset = 0; this.messages = []; this.scheduleRefresh();
+      } else if (matches("tui.select.up") || data === "k") this.index = (this.index - 1 + this.entries.length) % Math.max(1, this.entries.length);
+      else if (matches("tui.select.down") || data === "j") this.index = (this.index + 1) % Math.max(1, this.entries.length);
+      else if (data === "g") this.index = 0;
+      else if (data === "G") this.index = Math.max(0, this.entries.length - 1);
+      this.selectedId = this.entries[this.index]?.id;
+    }
+    if (!this.detailId) this.scheduleRefresh();
+    this.tui.requestRender();
+  }
+  private height() { return Math.max(3, (this.tui.terminal.rows || 30) - (this.inputMode ? 11 : 9)); }
+
   render(width: number) {
-    const snapshot = this.manager.get(this.id);
-    if (!snapshot) return ["Subagent no longer tracked"];
-    const viewport = this.viewportHeight();
-    const transcript = transcriptLines(snapshot, width, this.theme);
-    const context = formatContextUtilization({ tokens: snapshot.usage.contextTokens, contextWindow: snapshot.usage.contextWindow });
-    this.offset = Math.min(this.offset, Math.max(0, transcript.length - viewport));
-    const end = transcript.length - this.offset;
-    const body = transcript.slice(Math.max(0, end - viewport), end);
-    while (body.length < viewport) body.push("");
-    const color = snapshot.status === "done" ? "success" : snapshot.status === "running" || snapshot.status === "waiting" ? "warning" : "error";
-    const position = this.offset > 0 ? this.theme.fg("warning", ` · ${this.offset} line${this.offset === 1 ? "" : "s"} below`) : "";
-    return [
-      truncateToWidth(`${this.theme.fg("accent", "‹ Subagents /")} ${this.theme.bold(sanitizeTerminalText(snapshot.title))}`, width),
-      truncateToWidth(`${square(snapshot, this.theme)} ${this.theme.fg(color, snapshot.status)} · ${snapshot.origin} · ${snapshot.model}:${snapshot.thinking} · ${snapshot.sessionMode} · ${elapsed(snapshot)}${context ? ` · ${context}` : ""}${position}`, width),
-      truncateToWidth(this.theme.fg("dim", `Started ${fullTimestamp(snapshot.createdAt)} · Ended ${snapshot.settledAt ? fullTimestamp(snapshot.settledAt) : "running"} · ${snapshot.name} (${snapshot.id})`), width),
-      this.theme.fg("border", "─".repeat(width)),
-      ...body.map((line) => truncateToWidth(line, width)),
-      this.theme.fg("border", "─".repeat(width)),
-      ...(this.inputMode ? [this.theme.fg("accent", "Send guidance"), ...this.input.render(width)] : []),
-      ...(this.sendError ? [truncateToWidth(this.theme.fg("error", sanitizeTerminalText(this.sendError)), width)] : []),
-      this.theme.fg("dim", this.inputMode
-        ? "enter send · esc cancel"
-        : `j/k scroll · g/G top/bottom · pgup/pgdn page · i send guidance · h/esc back${isPendingSubagentStatus(snapshot.status) ? " · x abort" : ""}`),
-    ];
+    const theme = this.theme;
+    const job = this.entries.find((job) => job.id === this.detailId);
+    const lines = job ? this.renderDetail(job, width) : this.renderList(width);
+    if (this.error) lines.push(theme.fg("error", terminalText(this.error)));
+    return lines.map((line) => truncateToWidth(line, width));
+  }
+  private renderList(width: number) {
+    const theme = this.theme, now = Date.now(), capacity = this.height();
+    const start = Math.max(0, Math.min(this.index - Math.floor(capacity / 2), this.entries.length - capacity));
+    const beginning = Math.min(now, ...this.entries.map((job) => job.startedAt));
+    const end = Math.max(beginning + 1, ...this.entries.map((job) => job.finishedAt ?? now));
+    const wide = width >= 96;
+    const timelineWidth = Math.max(12, Math.min(24, Math.floor(width * 0.18)));
+    const titleWidth = Math.max(12, width - timelineWidth - 47);
+    const lines = [theme.bold(theme.fg("accent", `Subagents · ${this.entries.length} jobs · preset ${getActiveSubagentPresetName()}`)),
+      theme.fg("dim", wide ? `${pad("  AGENT / TASK", titleWidth)} ${pad("STATUS", 10)}START     END       DUR    TIMELINE` : "  AGENT / TASK · STATUS · START → END · DURATION"), theme.fg("border", "─".repeat(width))];
+    for (const [offset, job] of this.entries.slice(start, start + capacity).entries()) {
+      const identity = `${start + offset === this.index ? "❯" : " "} ${theme.fg(color(job), "■")} ${jobTitle(job)}`;
+      const duration = elapsed(job.startedAt, job.finishedAt ?? now);
+      lines.push(wide
+        ? `${pad(identity, titleWidth)} ${pad(theme.fg(color(job), job.status), 10)}${clock(job.startedAt)}  ${clock(job.finishedAt)}  ${pad(duration, 6)} ${theme.fg(color(job), timelineBar(job, beginning, end, timelineWidth))}`
+        : `${start + offset === this.index ? "❯" : " "} ${theme.fg(color(job), job.status)} · ${clock(job.startedAt)} → ${clock(job.finishedAt)} · ${duration} · ${jobTitle(job)}`);
+    }
+    if (!this.entries.length) {
+      lines.push("No jobs yet. Agents appear here when you delegate work.", "");
+      for (const [name, agent] of Object.entries(getAgents()).slice(0, Math.max(0, capacity - 2))) lines.push(`${name} · ${agent.model}:${agent.thinking}`);
+    }
+    const selected = this.entries[this.index];
+    while (lines.length < capacity + 3) lines.push("");
+    if (selected) lines.push(theme.fg("dim", `${jobSummary(selected, this.metadataId === selected.id ? this.metadata : undefined)} · ${selected.name ?? selected.id}`), theme.fg("muted", jobActivity(selected, this.jobs?.preview(selected.id))));
+    lines.push(theme.fg("dim", "j/k select · enter/l inspect · x abort · c configure · p preset · esc close"));
+    return lines;
+  }
+  private renderDetail(job: Job, width: number) {
+    const theme = this.theme, body: string[] = [];
+    for (const message of this.messages) {
+      if (message.role === "assistant") {
+        for (const part of message.content) {
+          if (part.type === "text") body.push(...new Markdown(terminalText(part.text), 0, 0, getMarkdownTheme()).render(width), "");
+          else if (part.type === "thinking") body.push(theme.fg("dim", `Thinking · ${terminalText(part.thinking).replace(/\s+/g, " ").slice(-240)}`));
+          else if (part.type === "toolCall") body.push(theme.fg("toolTitle", `› ${toolSummary(part.name, part.arguments)}`));
+        }
+      } else {
+        const text = terminalText(typeof message.content === "string" ? message.content : message.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("\n"));
+        if (message.role === "user") body.push(theme.fg("accent", "Task"), ...wrapTextWithAnsi(text, Math.max(1, width)), "");
+        else if (message.role === "toolResult") {
+          const all = text.split("\n");
+          body.push(...all.slice(0, 3).map((line) => theme.fg(message.isError ? "error" : "dim", `  │ ${line}`)));
+          if (all.length > 3) body.push(theme.fg("dim", `  … ${all.length - 3} more lines`));
+        }
+      }
+    }
+    // The transcript already contains partial assistant text. Show only the
+    // current tool/retry state here, not a second copy of the streamed answer.
+    const activity = jobActivity(job, this.jobs?.preview(job.id));
+    if (activeJob(job) && (!this.messages.length || /^(Running |Retrying:|Compacting context|Waiting for model|Stalled)/.test(activity))) body.push(theme.fg("muted", activity));
+    for (const item of this.metadata?.queued ?? []) if (item.mode !== "write") {
+      const content = typeof item.content === "string" ? item.content : JSON.stringify(item.content);
+      body.push(theme.fg("warning", `Guidance queued · ${terminalText(content)}`));
+    }
+    if (job.question) body.push(...wrapTextWithAnsi(theme.fg("warning", `Question for parent · ${terminalText(job.question.text)}`), Math.max(1, width)));
+    if (job.error) body.push(theme.fg("error", terminalText(job.error)));
+    const height = this.height();
+    this.offset = Math.min(this.offset, Math.max(0, body.length - height));
+    const end = body.length - this.offset;
+    const shown = body.slice(Math.max(0, end - height), end);
+    while (shown.length < height) shown.push("");
+    return [theme.bold(theme.fg("accent", `‹ Subagents / ${jobTitle(job)}`)),
+      `${theme.fg(color(job), job.status)} · ${jobSummary(job, this.metadata)}`,
+      theme.fg("dim", `${job.name ?? job.id} · started ${clock(job.startedAt)} · ended ${clock(job.finishedAt)} · ${job.cwd}`),
+      theme.fg("dim", `Conversation ${job.conversationId} · latest ${this.historyLimit} entries${this.offset ? ` · ${this.offset} lines below` : ""}`),
+      theme.fg("border", "─".repeat(width)), ...shown,
+      ...(this.inputMode ? [theme.fg("accent", job.status === "waiting" ? "Answer the child's question" : "Send guidance or follow-up"), ...this.input.render(width)] : []),
+      theme.fg("dim", this.inputMode ? "enter send · esc cancel" : `j/k scroll · g/G top/bottom · o older · i/enter ${job.status === "waiting" ? "answer" : "message"} · esc/h back${pendingJob(job) ? " · x abort" : ""}`)];
   }
 }
 
-export async function showTakeover(ctx: ExtensionCommandContext, manager: SubagentManager, id: string) {
-  await ctx.ui.custom<void>((tui, theme, keys, done) => new Takeover(tui, theme, keys, manager, id, done), {
+export function showAgents(ctx: ExtensionContext, jobs?: AgentJobs, initialId?: string) {
+  return ctx.ui.custom<Action>((tui, theme, keys, done) => new Dashboard(tui, theme, keys, jobs, done, initialId), {
     overlay: true, overlayOptions: { anchor: "center", width: "100%", maxHeight: "100%" },
   });
-}
-
-export async function showSubagents(ctx: ExtensionCommandContext, manager: SubagentManager, initialId?: string) {
-  if (initialId && manager.get(initialId)) return showTakeover(ctx, manager, initialId);
-  while (true) {
-    const id = await ctx.ui.custom<string | null>((tui, theme, keys, done) => new Dashboard(tui, theme, keys, manager, done), {
-      overlay: true, overlayOptions: { anchor: "center", width: "100%", maxHeight: "100%" },
-    });
-    if (!id) return;
-    await showTakeover(ctx, manager, id);
-  }
 }

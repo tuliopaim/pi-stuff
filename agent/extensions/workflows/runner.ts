@@ -415,7 +415,6 @@ export function createFirstResponseWatchdog(
       reject(new FirstResponseTimeoutError(timeoutMs, options.model));
       void onTimeout().catch(() => {});
     }, timeoutMs);
-    timer.unref?.();
   });
 
   const cancel = () => {

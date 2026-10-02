@@ -1,130 +1,43 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import type { Job, JobMetadata } from "./durable.ts";
 import { formatCompactTokens, formatContextUtilization } from "../shared/context-utilization.ts";
-import { isPendingSubagentStatus, type SubagentSnapshot, type SubagentUsage } from "./domain.ts";
 
-type Theme = ExtensionContext["ui"]["theme"];
-
-export function sanitizeTerminalText(text: string) {
-  return text
-    .replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, "")
-    .replace(/\x1B(?:\[[0-?]*[ -/]*[@-~]|[@-_])/g, "")
-    .replace(/\r\n?/g, "\n")
-    .replace(/\t/g, "    ")
-    .replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g, "");
+// Strip terminal controls before displaying model output or tool arguments.
+export function terminalText(text: string) {
+  return text.replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "").replace(/\x1b(?:\[[0-?]*[ -/]*[@-~]|[@-_])/g, "").replace(/\t/g, "    ").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
 }
 
-function elapsed(snapshot: SubagentSnapshot, now = Date.now()) {
-  const startedAt = Number.isFinite(snapshot.createdAt) ? snapshot.createdAt : now;
-  const seconds = Math.max(0, Math.round(((snapshot.settledAt ?? now) - startedAt) / 1000));
-  return seconds >= 60 ? `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s` : `${seconds}s`;
+export function elapsed(startedAt: number, now = Date.now()) {
+  if (!Number.isFinite(startedAt)) return "-";
+  const seconds = Math.max(0, Math.floor((now - startedAt) / 1000));
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s`;
 }
 
-function usageParts(usage: SubagentUsage) {
-  const parts: string[] = [];
-  if (usage.turns) parts.push(`${usage.turns} turn${usage.turns === 1 ? "" : "s"}`);
-  if (usage.input) parts.push(`${formatCompactTokens(usage.input)} in`);
-  if (usage.output) parts.push(`${formatCompactTokens(usage.output)} out`);
-  if (usage.cacheRead) parts.push(`R${formatCompactTokens(usage.cacheRead)}`);
-  if (usage.cost) parts.push(`$${usage.cost.toFixed(4)}`);
-  return parts;
+export function toolSummary(name: string, args: Record<string, unknown>) {
+  const detail = ["path", "query", "pattern", "command"].map((key) => args[key]).find((value) => typeof value === "string");
+  return terminalText(`${name}${detail ? `  ${detail}` : ""}`).replace(/\s+/g, " ").slice(0, 240);
 }
 
-export function formatSubagentUsage(snapshot: SubagentSnapshot, now = Date.now()) {
-  const usage = snapshot.usage ?? {
-    turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0,
-  };
-  const context = formatContextUtilization({
-    tokens: usage.contextTokens,
-    contextWindow: usage.contextWindow,
-  });
-  return [
-    `${snapshot.model ?? "unknown"}:${snapshot.thinking ?? "?"}`,
-    elapsed(snapshot, now),
-    ...(context ? [`${context} ctx`] : []),
-    ...usageParts(usage),
-  ].join(" · ");
+export function jobTitle(job: Job) {
+  return terminalText(`${job.name ?? job.agent} · ${job.title ?? job.task}`).replace(/\s+/g, " ");
 }
 
-function currentActivity(snapshot: SubagentSnapshot) {
-  if (snapshot.status === "waiting") return `? waiting for parent: ${sanitizeTerminalText(snapshot.question?.text ?? "question unavailable")}`;
-  if (snapshot.status === "stalled") {
-    const idleSeconds = Math.max(0, Math.round((Date.now() - (snapshot.lastActivityAt ?? snapshot.createdAt)) / 1000));
-    return `! stalled · idle ${idleSeconds}s`;
-  }
-  const activity = snapshot.activities?.at(-1);
-  if (activity) return `→ ${sanitizeTerminalText(activity)}`;
-  const live = sanitizeTerminalText(snapshot.liveText ?? "").split("\n").filter(Boolean).at(-1)?.trim();
-  if (live) return `↳ ${live}`;
-  if (snapshot.liveThinking) return "… thinking";
-  if (snapshot.status === "running") return "… starting";
-  if (snapshot.error) return `✗ ${sanitizeTerminalText(snapshot.error)}`;
-  return snapshot.status;
+export const activeJob = (job: Job) => job.status === "running" || job.status === "stalled";
+export const pendingJob = (job: Job) => activeJob(job) || job.status === "waiting";
+export const jobColor = (job: Job) => job.status === "done" ? "success" : pendingJob(job) ? "warning" : "error";
+
+export function usageText(info: Partial<Pick<JobMetadata, "usage" | "contextUsage">> = {}) {
+  const usage = info.usage;
+  const context = formatContextUtilization(info.contextUsage ?? {});
+  return [context && `${context} ctx`, usage && `↑${formatCompactTokens(usage.input ?? 0)} ↓${formatCompactTokens(usage.output ?? 0)}`,
+    usage?.cacheRead && `R${formatCompactTokens(usage.cacheRead)}`, usage && `$${(usage.cost?.total ?? 0).toFixed(4)}`].filter(Boolean).join(" · ");
 }
 
-function aggregate(entries: readonly SubagentSnapshot[]) {
-  const usage: SubagentUsage = {
-    turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0,
-  };
-  for (const entry of entries) {
-    if (!entry.usage) continue;
-    usage.turns += entry.usage.turns;
-    usage.input += entry.usage.input;
-    usage.output += entry.usage.output;
-    usage.cacheRead += entry.usage.cacheRead;
-    usage.cacheWrite += entry.usage.cacheWrite;
-    usage.cost += entry.usage.cost;
-  }
-  return usage;
+export function jobSummary(job: Job, info?: Partial<Pick<JobMetadata, "usage" | "contextUsage">>) {
+  return [`${job.model}:${job.thinking}`, elapsed(job.startedAt, job.finishedAt ?? Date.now()), usageText(info)].filter(Boolean).join(" · ");
 }
 
-function prioritized(entries: readonly SubagentSnapshot[]) {
-  return [...entries].sort((a, b) => {
-    if (isPendingSubagentStatus(a.status) !== isPendingSubagentStatus(b.status)) return isPendingSubagentStatus(a.status) ? -1 : 1;
-    return (b.createdAt ?? 0) - (a.createdAt ?? 0);
-  });
-}
-
-export function renderSubagentMonitor(
-  entries: readonly SubagentSnapshot[],
-  width: number,
-  theme: Theme,
-  now = Date.now(),
-) {
-  const running = entries.filter((entry) => entry.status === "running").length;
-  const waiting = entries.filter((entry) => entry.status === "waiting").length;
-  const stalled = entries.filter((entry) => entry.status === "stalled").length;
-  const done = entries.filter((entry) => entry.status === "done").length;
-  const failed = entries.length - running - waiting - stalled - done;
-  const counts = [
-    running ? `${running} running` : "",
-    waiting ? `${waiting} waiting` : "",
-    stalled ? `${stalled} stalled` : "",
-    done ? `${done} done` : "",
-    failed ? `${failed} failed` : "",
-  ].filter(Boolean);
-  const totals = usageParts(aggregate(entries));
-  const header = `${theme.fg("accent", theme.bold("SUBAGENTS"))} ${theme.fg("dim", [...counts, ...totals].join(" · "))}`;
-  const lines = [truncateToWidth(header, width)];
-  const shown = prioritized(entries).slice(0, 4);
-  for (const entry of shown) {
-    const color = entry.status === "done" ? "success" : entry.status === "running" || entry.status === "waiting" ? "warning" : "error";
-    lines.push(truncateToWidth(
-      `${theme.fg(color, "■")} ${theme.bold(sanitizeTerminalText(entry.title))} ${theme.fg("dim", `· ${entry.origin} · ${entry.id}`)}`,
-      width,
-    ));
-    lines.push(truncateToWidth(theme.fg("dim", `  ${formatSubagentUsage(entry, now)}`), width));
-    lines.push(truncateToWidth(theme.fg(entry.status === "running" ? "muted" : color, `  ${currentActivity(entry)}`), width));
-  }
-  if (entries.length > shown.length) lines.push(theme.fg("dim", `… ${entries.length - shown.length} more · /subagents to inspect`));
-  else lines.push(theme.fg("dim", "/subagents to inspect, steer, or cancel"));
-  return lines.map((line) => truncateToWidth(line, width));
-}
-
-export function formatWaitingSubagents(entries: readonly SubagentSnapshot[], now = Date.now()) {
-  return entries.map((entry) => [
-    `${isPendingSubagentStatus(entry.status) ? "■" : entry.status === "done" ? "✓" : "✗"} ${entry.title} · ${entry.id}`,
-    `  ${formatSubagentUsage(entry, now)}`,
-    `  ${currentActivity(entry)}`,
-  ].join("\n")).join("\n");
+export function jobActivity(job: Job, preview = "") {
+  if (job.question) return terminalText(`? ${job.question.text}`).replace(/\s+/g, " ");
+  if (job.status === "stalled") return `Stalled · last activity ${elapsed(job.lastActivityAt ?? job.startedAt)} ago`;
+  return terminalText(job.error || preview.split("\n").at(-1) || job.status).replace(/\s+/g, " ");
 }

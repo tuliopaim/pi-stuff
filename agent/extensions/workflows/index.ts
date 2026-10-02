@@ -753,7 +753,7 @@ export default function workflows(pi: ExtensionAPI) {
 
             // Check active preset routes if configured
             {
-              const v = validateSubagentRoute(modelOpt, thinkingLevel);
+              const v = validateSubagentRoute(modelOpt, thinkingLevel, providerOpt);
               if (!v.allowed) return fail(v.error);
             }
 

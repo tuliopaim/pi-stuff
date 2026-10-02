@@ -1,0 +1,64 @@
+{
+  "agents": {
+    "explore": {
+      "model": "openai-codex/gpt-6-luna",
+      "thinking": "high",
+      "description": "Cheap, focused codebase exploration",
+      "tools": ["read", "grep", "find", "ls"],
+      "skills": [],
+      "instructions": "You are a read-only codebase scout. Answer one narrow question. Do not edit files or run builds or tests. Return a compact answer, the relevant definitions and callers with path:line evidence, at most three files the parent should read, and any important unknowns. Stop once answered. Stay under 500 words."
+    },
+    "review": {
+      "model": "openai-codex/gpt-6.1-sol",
+      "thinking": "high",
+      "description": "Independent correctness and security review",
+      "tools": ["read", "grep", "find", "ls"],
+      "instructions": "You are a read-only code reviewer. Review the exact scope and intended behavior in the task. Trace affected callers. Report real correctness, security, data-loss, and regression issues in severity order with path:line evidence, impact, and the smallest fix. Do not report style preferences or unrelated pre-existing issues. Do not edit files. If no issues exist, say No findings. Include important validation gaps. Stay under 1200 words."
+    },
+    "plan": {
+      "model": "openai-codex/gpt-6.1-sol",
+      "thinking": "high",
+      "description": "Planning and design decisions from a fresh context",
+      "tools": ["read", "grep", "find", "ls"],
+      "instructions": "You are a read-only planner. Inspect the relevant code and callers, then propose the smallest workable plan. Name the files to change, behavior to preserve, checks to run, and unresolved decisions. Do not implement, edit files, or commit."
+    },
+    "default": {
+      "model": "openai-codex/gpt-6.1-sol",
+      "thinking": "medium",
+      "description": "General-purpose handoffs, implementation, and tasks without a specialist",
+      "tools": ["read", "grep", "find", "ls", "bash", "edit", "write"],
+      "instructions": "You are a delegated general-purpose coding agent. Complete the self-contained task independently. Inspect relevant code before editing, make the smallest correct change, run focused validation, and report changed files and checks. Follow project instructions and relevant skills. Do not delegate further or commit unless the task explicitly requests it. If blocked, explain what the parent needs to decide."
+    },
+    "commit": {
+      "model": "openai-codex/gpt-6-luna",
+      "thinking": "medium",
+      "description": "Intentional commits, only when the user requests them",
+      "tools": ["read", "grep", "find", "ls", "bash"],
+      "skills": ["~/dotfiles/skills/commit-work"],
+      "instructions": "You are a specialized git commit agent. Read the commit-work skill and follow it exactly. Inspect all changes before staging, leave unrelated work uncommitted, never expose secrets, never amend or force push, and report each created commit's SHA and message."
+    }
+  },
+  "preset": "personal",
+  "presets": {
+    "personal": {},
+    "openai": {
+      "explore": { "model": "openai-codex/gpt-6-luna", "thinking": "low" },
+      "default": { "model": "openai-codex/gpt-6.1-sol", "thinking": "medium" },
+      "commit": { "model": "openai-codex/gpt-6.1-sol", "thinking": "medium" }
+    },
+    "opencode-go": {
+      "explore": { "model": "opencode-go/deepseek-v4-flash", "thinking": "medium" },
+      "review": { "model": "opencode-go/deepseek-v4.1-flash", "thinking": "max" },
+      "plan": { "model": "opencode-go/deepseek-v4.1-flash", "thinking": "max" },
+      "default": { "model": "opencode-go/glm-5.3-flash", "thinking": "high" },
+      "commit": { "model": "opencode-go/glm-5.3-flash", "thinking": "high" }
+    },
+    "copilot": {
+      "explore": { "model": "github-copilot/gpt-6-luna", "thinking": "medium" },
+      "review": { "model": "github-copilot/gpt-6.1-sol", "thinking": "high" },
+      "plan": { "model": "github-copilot/gpt-6.1-sol", "thinking": "high" },
+      "default": { "model": "github-copilot/gpt-6.1-sol", "thinking": "medium" },
+      "commit": { "model": "github-copilot/gpt-6-luna", "thinking": "medium" }
+    }
+  }
+}

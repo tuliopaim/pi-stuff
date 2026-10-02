@@ -1,12 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const DELEGATION_TOOLS = new Set([
-  "agent",
-  "subagent_spawn",
-  "subagent_wait",
-  "subagent_cancel",
-  "subagent_check",
-  "subagent_list",
   "workflow",
 ]);
 
