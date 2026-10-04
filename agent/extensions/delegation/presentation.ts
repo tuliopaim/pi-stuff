@@ -65,7 +65,7 @@ export function statusCounts(jobs: Job[], theme: Theme) {
 }
 
 export function renderJobsWidget(jobs: Job[], counts: string, preview: (id: string) => string, theme: Theme, width: number) {
-  const lines = [spread(`${theme.fg("muted", "Subagents")}  ${counts}`, theme.fg("dim", "/subagents"), width)];
+  const lines = [spread(`${theme.fg("muted", "Subagents")}  ${counts}`, theme.fg("dim", "/agents"), width)];
   for (const job of jobs) {
     const title = `${theme.fg(jobColor(job), STATUS_ICONS[job.status] ?? "•")} ${theme.fg("toolTitle", terminalText(job.name ?? job.agent))}  ${terminalText(job.title ?? job.task).replace(/\s+/g, " ")}`;
     lines.push(spread(title, theme.fg("dim", `${shortModel(job.model)}:${job.thinking} · ${elapsed(job.startedAt, job.finishedAt ?? Date.now())}`), width));

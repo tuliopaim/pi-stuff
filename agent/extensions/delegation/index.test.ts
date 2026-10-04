@@ -35,7 +35,7 @@ function harness(t: test.TestContext, createJobs?: any) {
 test("one management tool plus focused shortcuts replace the old tool family", (t) => {
   const registered = harness(t);
   assert.deepEqual([...registered.tools.keys()], ["agent", "scout", "review", "commit"]);
-  assert.deepEqual([...registered.commands.keys()], ["subagent-preset", "agents", "subagents", "commit"]);
+  assert.deepEqual([...registered.commands.keys()], ["subagent-preset", "agents", "commit"]);
   assert.equal(registered.tools.get("agent").exposure, "model-only");
   assert.match(registered.tools.get("agent").description, /Omit agent to use default/);
   assert.ok(!registered.tools.has("subagent_spawn"));
@@ -290,7 +290,7 @@ test("/agents opens a dashboard rather than a chain of selection dialogs", async
     select: async () => { assert.fail("The default view should be the live dashboard"); } } };
   await commands.get("agents").handler("", ctx);
   assert.equal(opened, true);
-  assert.equal(commands.get("agents"), commands.get("subagents"));
+  assert.equal(commands.has("subagents"), false);
 });
 
 test("/commit streams activity, renders its final answer, and removes its input listener", async (t) => {

@@ -330,7 +330,6 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
     },
   };
   pi.registerCommand("agents", manageAgents);
-  pi.registerCommand("subagents", manageAgents);
   pi.registerCommand("commit", {
     description: "Create intentional commits with the commit agent",
     handler: async (args, ctx) => {
