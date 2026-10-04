@@ -410,10 +410,13 @@ export class AgentJobs {
 
   async wait(id: string, signal?: AbortSignal) {
     let job = await this.get(id);
-    const abort = () => { if (!job.background) void this.cancelRequest(job, "Cancelled").catch(() => {}); };
+    // Ownership belongs to this wait, not the submission/reporting mode changed by guidance.
+    const foreground = !job.background;
+    const jobId = job.id;
+    const abort = () => { if (foreground) void this.cancel(jobId, "Cancelled").catch(() => {}); };
     signal?.addEventListener("abort", abort, { once: true });
     try {
-      if (signal?.aborted) { if (!job.background) await this.cancelRequest(job, "Cancelled"); signal.throwIfAborted(); }
+      if (signal?.aborted) { if (foreground) await this.cancel(jobId, "Cancelled"); signal.throwIfAborted(); }
       // Cancelling a foreground wait cancels its job. Background waits leave the job running.
       while (isActive(job)) {
         this.track(job);

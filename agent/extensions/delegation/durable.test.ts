@@ -302,25 +302,54 @@ test("immediate guidance does not discard the original assignment", async (t) =>
   assert.match(text, /second guidance/);
 });
 
-test("cancelling queued guidance keeps mutation ownership until the in-flight tool stops", async (t) => {
+for (const background of [false, true]) test(`aborting an originally ${background ? "background" : "foreground"} wait after guidance preserves job ownership`, async (t) => {
   const { jobs } = await setup(t, [fauxAssistantMessage([fauxToolCall("write", { path: "result.txt", content: "changed" })], { stopReason: "toolUse" })]);
   let started!: () => void, release!: () => void;
   const entered = new Promise<void>((resolve) => { started = resolve; });
   const gate = new Promise<void>((resolve) => { release = resolve; });
   const tool = (jobs as any).tools.find((tool: any) => tool.name === "write");
-  tool.execute = async () => { started(); await gate; return { content: [{ type: "text", text: "finished" }] }; };
+  let toolSignal!: AbortSignal;
+  tool.execute = async (_args: unknown, _api: unknown, context: { abortSignal: AbortSignal }) => {
+    toolSignal = context.abortSignal;
+    started(); await gate;
+    return { content: [{ type: "text", text: "finished" }] };
+  };
   const cwd = directory(t);
-  const job = await jobs.spawn("writer", { ...config, tools: ["write"] }, "write", cwd, true);
+  const job = await jobs.spawn("writer", { ...config, tools: ["write"] }, "write", cwd, background);
   await entered;
-  await jobs.message(job.id, "queued guidance");
-  await until(async () => (await jobs.metadata(job.id)).queued.length > 0);
-  const cancelling = jobs.cancel(job.id);
+  const controller = new AbortController();
+  const listener = t.mock.method(controller.signal, "addEventListener");
+  const waiting = jobs.wait(job.name!, controller.signal);
+  const rejected = assert.rejects(waiting);
+  let cancelling: Promise<void> | undefined;
   try {
-    await new Promise((resolve) => setTimeout(resolve, 40));
+    await until(() => listener.mock.callCount() > 0);
+    const guided = await jobs.message(job.name!, "queued guidance");
+    assert.notEqual(guided.requestId, job.requestId);
+    assert.equal(guided.background, true);
+    await until(async () => (await jobs.metadata(job.id)).queued.length > 0);
+    controller.abort();
+    await rejected;
+    if (background) {
+      assert.equal(toolSignal.aborted, false);
+      assert.equal((await jobs.get(job.id)).error, undefined);
+      cancelling = jobs.cancel(job.id);
+    }
+    await until(() => toolSignal.aborted);
+    assert.equal((await jobs.get(job.id)).error, "Cancelled");
     assert.ok(["running", "stalled"].includes((await jobs.get(job.id)).status));
     await assert.rejects(jobs.spawn("writer", { ...config, tools: ["write"] }, "second write", cwd, true), /mutating agent/);
-  } finally { release(); await cancelling; }
+    release();
+    assert.equal((await jobs.wait(job.id)).job.status, "cancelled");
+  } finally {
+    controller.abort(); release();
+    await rejected;
+    await cancelling;
+    await jobs.cancel(job.id);
+  }
   assert.equal((await jobs.get(job.id)).status, "cancelled");
+  const replacement = await jobs.spawn("writer", { ...config, tools: ["write"] }, "replacement", cwd, true);
+  await jobs.cancel(replacement.id);
 });
 
 test("messages steer an active job and continuations keep the same conversation", async (t) => {

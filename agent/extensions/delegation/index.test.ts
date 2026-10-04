@@ -9,6 +9,7 @@ import { AgentJobs } from "./durable.ts";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { MemoryStorage } from "@earendil-works/pi-durable";
+import { AgentSession } from "@earendil-works/pi-coding-agent";
 
 const plainTheme = { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text, bold: (text: string) => text };
 const widgetContent = (content: any) => typeof content === "function" ? content({}, plainTheme).render(120) : content;
@@ -171,7 +172,7 @@ test("the parent agent tool receives a real child question and resumes that chil
   const { tools, events, persisted } = harness(t, async () => jobs);
   const ctx = { cwd: process.env.PI_CODING_AGENT_DIR, hasUI: false, isProjectTrusted: () => false,
     modelRegistry: { find: models.getModel.bind(models), streamSimple: models.streamSimple.bind(models) },
-    sessionManager: { getSessionId: () => "session", getSessionFile: () => undefined, getBranch: () => persisted }, ui: { setStatus: () => {}, setWidget: () => {}, notify: () => {} } };
+    sessionManager: { getSessionId: () => "session", getSessionFile: () => undefined, getBranch: () => persisted, getEntries: () => persisted }, ui: { setStatus: () => {}, setWidget: () => {}, notify: () => {} } };
   await events.get("session_start")({}, ctx);
   const tool = tools.get("agent");
   const question = await tool.execute("question-call", { task: "Implement the scoped change", route: "faux/faux-1:off", name: "schema-worker" }, undefined, undefined, ctx);
@@ -179,7 +180,10 @@ test("the parent agent tool receives a real child question and resumes that chil
   assert.equal(question.isError, false);
   assert.match(question.content[0].text, /Which schema/);
   assert.match(question.content[0].text, /action: "message"/);
-  persisted.push({ type: "message", message: { role: "toolResult", details: question.details } });
+  assert.deepEqual(question.usage, question.details.usage);
+  persisted.push({ type: "message", message: { role: "toolResult", ...question } });
+  const repeatedQuestion = await tool.execute("repeat-question", { action: "wait", id: "schema-worker" }, undefined, undefined, ctx);
+  assert.equal(repeatedQuestion.usage, undefined);
   faux.setResponses([fauxAssistantMessage("Used the existing schema.")]);
   await tool.execute("answer-call", { action: "message", id: "schema-worker", task: "Use the existing schema" }, undefined, undefined, ctx);
   const answer = await tool.execute("wait-call", { action: "wait", id: "schema-worker" }, undefined, undefined, ctx);
@@ -187,6 +191,14 @@ test("the parent agent tool receives a real child question and resumes that chil
   assert.equal(answer.details.job.conversationId, question.details.job.conversationId);
   assert.match(answer.content[0].text, /Used the existing schema/);
   assert.match(JSON.stringify(await jobs.transcript("schema-worker")), /Use the existing schema/);
+  assert.ok(answer.usage.output > 0);
+  for (const key of ["input", "output", "cacheRead", "cacheWrite", "totalTokens"] as const)
+    assert.equal(question.usage[key] + answer.usage[key], answer.details.usage[key]);
+  persisted.push({ type: "message", message: { role: "toolResult", ...answer } });
+  const stats = AgentSession.prototype.getSessionStats.call({ sessionManager: ctx.sessionManager, getContextUsage: () => undefined } as any);
+  assert.equal(stats.tokens.output, answer.details.usage.output);
+  const repeatedAnswer = await tool.execute("repeat-answer", { action: "wait", id: question.details.job.id }, undefined, undefined, ctx);
+  assert.equal(repeatedAnswer.usage, undefined);
   await events.get("session_shutdown")({}, ctx);
 });
 
@@ -255,7 +267,7 @@ test("commit questions persist as question cards and are acknowledged", async (t
   const { events, commands, sent, persisted } = harness(t, async () => manager);
   const ctx = { cwd: process.env.PI_CODING_AGENT_DIR, hasUI: true, isProjectTrusted: () => false, isIdle: () => true,
     modelRegistry: { find: () => ({}), streamSimple: () => {} }, sessionManager: { getSessionId: () => "session", getSessionFile: () => undefined, getBranch: () => persisted },
-    ui: { setStatus: () => {}, setWidget: () => {}, notify: () => {} } };
+    ui: { setStatus: () => {}, setWidget: () => {}, notify: () => {}, theme: { fg: (_color: string, text: string) => text } } };
   await events.get("session_start")({}, ctx);
   await commands.get("commit").handler(job.task, ctx);
   assert.equal(sent[0].message.customType, "agent-question");
@@ -308,5 +320,43 @@ test("/commit streams activity, renders its final answer, and removes its input 
   const rendered = renderers.get("agent-result")(sent[0].message, {}, theme).render(80).join("\n");
   assert.match(rendered, /commit · done/);
   assert.match(rendered, /Created abc123/);
+  await events.get("session_shutdown")({}, ctx);
+});
+
+test("explicit background collection counts once, survives reload, and ignores automatic cards", async (t) => {
+  const job = { id: "background-id", name: "worker", requestId: "request", agent: "default", status: "done", background: true,
+    delivered: false, model: "provider/model", thinking: "low", task: "task" };
+  const usage = { input: 10, output: 5, cacheRead: 3, cacheWrite: 2, totalTokens: 20,
+    cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 } };
+  const result = { job, output: "answer", usage };
+  const manager = { subscribe: () => () => {}, resume: async () => {}, list: async () => [job], result: async () => result,
+    wait: async () => result, message: async () => job, cancel: async () => {}, acknowledge: async () => {}, preview: () => "", close: async () => {} };
+  const { tools, events, sent, persisted } = harness(t, async () => manager);
+  const ctx = { hasUI: false, modelRegistry: { find: () => {}, streamSimple: () => {} },
+    sessionManager: { getSessionId: () => "session", getSessionFile: () => undefined, getBranch: () => [], getEntries: () => persisted },
+    ui: { setStatus: () => {}, setWidget: () => {}, notify: () => {} } };
+  await events.get("session_start")({}, ctx);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].message.usage, undefined);
+  assert.deepEqual(sent[0].message.details.usage, usage);
+  const tool = tools.get("agent");
+  for (const action of ["status", "message", "cancel"])
+    assert.equal((await tool.execute(action, { action, id: job.name, task: "guidance" }, undefined, undefined, ctx)).usage, undefined);
+  const collected = await Promise.all([job.name, job.id].map((id) => tool.execute("wait", { action: "wait", id }, undefined, undefined, ctx)));
+  assert.deepEqual(collected[0].usage, usage);
+  assert.equal(collected[1].usage, undefined, "parallel waits reserve usage before either result is persisted");
+  persisted.push({ type: "message", message: { role: "toolResult", ...collected[0] } });
+  await events.get("session_shutdown")({}, ctx);
+  await events.get("session_start")({}, ctx);
+  assert.equal((await tool.execute("wait-again", { action: "wait", id: job.id }, undefined, undefined, ctx)).usage, undefined);
+  const stats = AgentSession.prototype.getSessionStats.call({ sessionManager: ctx.sessionManager, getContextUsage: () => undefined } as any);
+  assert.equal(stats.cost, usage.cost.total);
+  assert.equal(stats.tokens.total, usage.totalTokens);
+  result.usage = { input: 20, output: 10, cacheRead: 6, cacheWrite: 4, totalTokens: 40,
+    cost: { input: 2, output: 4, cacheRead: 6, cacheWrite: 8, total: 20 } };
+  const continuation = await tool.execute("continuation", { action: "wait", id: job.name }, undefined, undefined, ctx);
+  assert.deepEqual(continuation.usage, usage, "all token and cost fields report only the new delta");
+  assert.deepEqual(continuation.details.usage, result.usage, "display details stay cumulative");
+  assert.equal((await tool.execute("repeat", { action: "wait", id: job.id }, undefined, undefined, ctx)).usage, undefined);
   await events.get("session_shutdown")({}, ctx);
 });

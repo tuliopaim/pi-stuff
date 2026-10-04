@@ -3,6 +3,7 @@ import { awaitWithContext, BACKGROUND_CONTEXT, withAbortSignal } from "@earendil
 import { formatSkillsForPrompt, getAgentDir, getMarkdownTheme, type AgentToolResult, type ExtensionAPI, type ExtensionContext, type ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Key, Markdown, matchesKey, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import type { Usage } from "@earendil-works/pi-ai";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai/models";
 import { MemoryStorage } from "@earendil-works/pi-durable";
 import { createChildResources, resolveStandaloneChildProjectTrust } from "../shared/child-session.ts";
@@ -10,7 +11,7 @@ import { configPath, getActiveSubagentPresetName, getAgents, getSubagentPresetNa
 import { AgentJobs, modelsFromRegistry, type Job, type JobResult } from "./durable.ts";
 import { registerDynamicRouteGuidance } from "./runtime.ts";
 import { showAgents } from "./dashboard.ts";
-import { activeJob, elapsed, jobActivity, jobColor, jobSummary, jobTitle, pendingJob, terminalText } from "./presentation.ts";
+import { activeJob, elapsed, jobColor, jobSummary, pendingJob, renderJobsWidget, shortPaths, statusCounts, terminalText } from "./presentation.ts";
 
 const SHORTCUTS = {
   scout: { agent: "explore", description: "Delegate focused, read-only codebase reconnaissance to a cheaper model.", guidelines: ["Default to direct inspection. Use scout only for one narrow question that needs more than 2-3 files. Verify only evidence needed for edits. Do not use it for implementation or repeat completed exploration."] },
@@ -34,16 +35,25 @@ function renderCall(agent: string, args: { task?: string; route?: string; name?:
   } else config = undefined;
   if (ctx?.state) { ctx.state.config = config; ctx.state.configKey = key; }
   const label = args.action && args.action !== "run" ? `${args.action} ${args.id ?? "agents"}` : `${args.name ?? agent}${args.background ? " in background" : ""}`;
-  return new Text(theme.fg("toolTitle", terminalText(label).replace(/\s+/g, " ")) + (config ? theme.fg("dim", ` · ${config.model}:${config.thinking}`) : "") +
-    (args.task ? `\n${terminalText(args.task)}` : "") + (ctx?.expanded && config ? `\n\nAgent instructions:\n${terminalText(config.instructions)}` : ""), 0, 0);
+  const header = theme.fg("toolTitle", terminalText(label).replace(/\s+/g, " ")) + (config ? theme.fg("dim", ` · ${config.model}:${config.thinking}`) : "");
+  if (!ctx?.expanded) return clipped([header, ...(args.task ? [theme.fg("muted", shortPaths(oneLine(args.task)))] : [])]);
+  return new Text(header + (args.task ? `\n${terminalText(args.task)}` : "") + (config ? `\n\nAgent instructions:\n${terminalText(config.instructions)}` : ""), 0, 0);
 }
+const oneLine = (text: string) => terminalText(text).replace(/\s+/g, " ").trim();
+// Collapsed cards cut lines at the terminal edge instead of wrapping them.
+const clipped = (lines: string[]) => ({ invalidate() {}, render: (width: number) => lines.map((line) => truncateToWidth(line, width)) });
 function renderResult(result: AgentToolResult<unknown>, options: ToolRenderResultOptions, theme: Theme, ctx?: RenderContext) {
   const details = result.details as Partial<JobResult> | undefined;
   const job = details?.job;
   const output = terminalText(details?.output ?? result.content.filter((part) => part.type === "text").map((part) => part.text).join("\n"));
   if (!job) return new Markdown(output, 0, 0, getMarkdownTheme());
   const body = new Container();
-  body.addChild(new Text(theme.fg(jobColor(job), `${job.agent} · ${job.status}${job.name ? ` · ${job.name}` : ""}`) + theme.fg("dim", `\n${jobSummary(job, details)}`), 0, 0));
+  const header = theme.fg(jobColor(job), `${job.name ?? job.agent} · ${job.status}`) + theme.fg("dim", ` · ${jobSummary(job, details)}`);
+  if (!options.expanded && activeJob(job)) {
+    const activity = output.split("\n").filter((line) => line.trim()).slice(-3).map((line) => theme.fg("dim", "› ") + theme.fg("muted", shortPaths(oneLine(line))));
+    return clipped([header, ...activity, theme.fg("dim", "ctrl+o to expand")]);
+  }
+  body.addChild(clipped([header]));
   if (options.expanded) {
     const instructions = details?.instructions ?? ctx?.state?.config?.instructions;
     body.addChild(new Text(`\nTask:\n${terminalText(job.task ?? ctx?.args?.task ?? "")}\n\nAgent instructions:\n${terminalText(instructions ?? "See the durable conversation's saved instructions.")}\n`, 0, 0));
@@ -80,6 +90,21 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
   let updateTimer: ReturnType<typeof setTimeout> | undefined;
   let flushing = false;
   const pendingReports = new Set<string>();
+  const reportedUsage = new Map<string, Usage>();
+  const collectUsage = (result: JobResult, ctx: ExtensionContext): Usage | undefined => {
+    const id = result.job.id;
+    // Session totals include all entries, even compacted or abandoned branches.
+    // Only tool results count: automatic background and /commit cards do not.
+    const saved = ctx.sessionManager.getEntries().findLast((entry: any) =>
+      entry.type === "message" && entry.message.role === "toolResult" && entry.message.usage && entry.message.details?.job?.id === id);
+    const baseline: Usage | undefined = reportedUsage.get(id) ?? (saved as any)?.message.details.usage;
+    if (baseline && result.usage.totalTokens < baseline.totalTokens) return undefined; // A concurrent collector may have a newer snapshot.
+    const usage = { ...result.usage, cost: { ...result.usage.cost } };
+    for (const key of ["input", "output", "cacheRead", "cacheWrite", "totalTokens"] as const) usage[key] -= baseline?.[key] ?? 0;
+    for (const key of ["input", "output", "cacheRead", "cacheWrite", "total"] as const) usage.cost[key] -= baseline?.cost[key] ?? 0;
+    reportedUsage.set(id, result.usage); // Reserve synchronously, including parallel waits before persistence.
+    return usage.totalTokens || usage.cost.total ? usage : undefined;
+  };
   const getJobs = () => { if (!jobs) throw new Error("Agent jobs are not ready"); return jobs; };
 
   const update = async () => {
@@ -88,21 +113,13 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
     if (!current || !ctx) return;
     const entries = await current.list();
     if (current !== jobs) return;
-    const counts = ["running", "waiting", "stalled", "done", "failed", "cancelled"].flatMap((status) => {
-      const count = entries.filter((job) => job.status === status).length;
-      return count ? [`${count} ${status}`] : [];
-    });
     if (ctx.hasUI) {
-      ctx.ui.setStatus("subagents", counts.length ? counts.join(" · ") : undefined);
+      const theme = ctx.ui.theme;
+      ctx.ui.setStatus("subagents", entries.some(pendingJob) ? `${theme.fg("muted", "subagents:")} ${statusCounts(entries.filter(pendingJob), theme)}` : undefined);
       const background = entries.filter((job) => job.background).sort((a, b) => Number(pendingJob(b)) - Number(pendingJob(a)) || (b.createdAt ?? b.startedAt) - (a.createdAt ?? a.startedAt)).slice(0, 4);
-      const summaries = await Promise.all(background.map(async (job) => ({ job, metadata: await current.metadata?.(job.id) })));
-      if (current !== jobs) return;
-      ctx.ui.setWidget("subagents-monitor", summaries.length ? (_tui, theme) => ({
+      ctx.ui.setWidget("subagents-monitor", background.some(pendingJob) ? (_tui, theme) => ({
         invalidate() {},
-        render: (width) => [theme.fg("accent", `SUBAGENTS · ${counts.join(" · ")}`), ...summaries.flatMap(({ job, metadata }) => [
-          theme.fg(jobColor(job), jobTitle(job)), theme.fg("dim", `  ${jobSummary(job, metadata)}`),
-          theme.fg("muted", `  ${jobActivity(job, current.preview(job.id))}`),
-        ]), theme.fg("dim", "/subagents to inspect, answer, or cancel")].map((line) => truncateToWidth(line, width)),
+        render: (width) => renderJobsWidget(background, statusCounts(background, theme), (id) => current.preview(id), theme, width),
       }) : undefined);
     }
     if (flushing) return;
@@ -136,6 +153,7 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
 
   pi.on("session_start", async (_event, ctx) => {
     if (!pi.getActiveTools().some((name) => ["agent", "scout", "review", "commit"].includes(name))) return;
+    reportedUsage.clear();
     context = ctx;
     setSubagentPreset(undefined);
     const saved = ctx.sessionManager.getBranch().findLast((entry: any) => entry.type === "custom" && entry.customType === "agent-preset") as { data?: { name?: string } } | undefined;
@@ -159,6 +177,7 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
     updateTimer = undefined;
     const closing = jobs; jobs = undefined; context = undefined;
     pendingReports.clear();
+    reportedUsage.clear();
     ctx.ui.setStatus("subagents", undefined);
     ctx.ui.setWidget("subagents-monitor", undefined);
     await closing?.close();
@@ -213,7 +232,10 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
     }),
     async execute(_call, args, signal, onUpdate, ctx) {
       const action = args.action ?? "run";
-      if (action === "run") return run(args.agent ?? "default", args.task ?? "", ctx, args.route, args.background, signal, onUpdate, args.working_dir ? resolve(ctx.cwd, args.working_dir) : ctx.cwd, { name: args.name, title: args.title });
+      if (action === "run") {
+        const result = await run(args.agent ?? "default", args.task ?? "", ctx, args.route, args.background, signal, onUpdate, args.working_dir ? resolve(ctx.cwd, args.working_dir) : ctx.cwd, { name: args.name, title: args.title });
+        return args.background ? result : { ...result, usage: collectUsage(result.details as JobResult, ctx) };
+      }
       const current = getJobs();
       if (action === "list") {
         const configured = Object.entries(getAgents()).map(([name, config]) => `${name}: ${config.description} (${config.model}:${config.thinking})`);
@@ -227,7 +249,7 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
       }
       if (action === "cancel") await current.cancel(args.id);
       const result = action === "wait" ? await current.wait(args.id, signal) : await current.result(args.id);
-      return { content: [{ type: "text", text: formatResult(result) }], details: result, isError: result.job.status === "failed" };
+      return { content: [{ type: "text", text: formatResult(result) }], details: result, usage: action === "wait" ? collectUsage(result, ctx) : undefined, isError: result.job.status === "failed" };
     },
     renderCall: (args, theme, ctx) => renderCall(args.agent ?? "default", args, theme, ctx),
     renderResult,
@@ -236,7 +258,10 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
     name, label: name, exposure: "model-only", description: shortcut.description,
     promptGuidelines: [...shortcut.guidelines, "An explicit user model pick goes in route and overrides this agent's model."],
     parameters: Type.Object({ task: Type.String(), route: Type.Optional(Type.String({ description: "Agent name or provider/model[:thinking]" })) }),
-    execute: (_call, args, signal, onUpdate, ctx) => run(shortcut.agent, args.task, ctx, args.route, false, signal, onUpdate),
+    execute: async (_call, args, signal, onUpdate, ctx) => {
+      const result = await run(shortcut.agent, args.task, ctx, args.route, false, signal, onUpdate);
+      return { ...result, usage: collectUsage(result.details as JobResult, ctx) };
+    },
     renderCall: (args, theme, ctx) => renderCall(shortcut.agent, args, theme, ctx),
     renderResult,
   });
