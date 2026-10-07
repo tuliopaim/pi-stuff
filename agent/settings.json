@@ -4,11 +4,13 @@
   "defaultModel": "gpt-6.1-sol",
   "defaultThinkingLevel": "medium",
   "enabledModels": [
-    "openai/gpt-6-astra",
+    "github-copilot/gpt-6-luna:medium",
+    "github-copilot/gpt-6.1-sol:medium",
     "openai/gpt-6.1-sol:medium",
     "openai/gpt-6-luna:high",
     "opencode-go/deepseek-v4.1-flash:high",
-    "opencode-go/glm-5.3-flash"
+    "opencode-go/glm-5.3-flash",
+    "openai/gpt-6-astra"
   ],
   "editorPaddingX": 2,
   "hideThinkingBlock": true,
