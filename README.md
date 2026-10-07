@@ -13,8 +13,11 @@ Subagents use Pi 1.0's experimental [Pi Durable](https://earendil.com/posts/pi-d
 | `plan` | Planning and design decisions | GPT-6 Astra | Read-only |
 | `default` | Implementation and useful handoffs without a specialist | DeepSeek V4.1 Flash | Read, shell, edit, write |
 | `commit` | Intentional commits, only when requested | GPT-6 Luna | Read and shell |
+| `setup-wt` | Task worktree and workspace setup, no implementation | GPT-6 Luna | Read and shell |
 
 The parent can use the `default` agent whenever a self-contained handoff is useful. You do not need to request delegation or choose a specialist first. The `scout`, `review`, and `commit` tools remain shortcuts to the corresponding named agents.
+
+Use `/setup-wt <task> [repo, base, app]` to delegate to the setup agent. It follows the shared `setup-wt` skill and defaults to a Herdr workspace through `hsw`. The command is a prompt template, so the parent handles clarification questions.
 
 ### Configure agents
 
