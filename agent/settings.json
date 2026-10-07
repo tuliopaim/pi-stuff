@@ -11,7 +11,7 @@
     "opencode-go/glm-5.3-flash"
   ],
   "editorPaddingX": 2,
-  "hideThinkingBlock": false,
+  "hideThinkingBlock": true,
   "packages": [
     "git:github.com/code-yeongyu/pi-apply-patch",
     {
