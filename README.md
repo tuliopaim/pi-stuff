@@ -9,8 +9,8 @@ Subagents use Pi 1.0's experimental [Pi Durable](https://earendil.com/posts/pi-d
 | Agent | Purpose | Default model | Access |
 |---|---|---|---|
 | `explore` | Focused codebase reconnaissance | GPT-6 Luna | Read-only |
-| `review` | Independent correctness and security review | GPT-6 Astra | Read-only |
-| `plan` | Planning and design decisions | GPT-6 Astra | Read-only |
+| `review` | Independent correctness and security review | GPT-6 Astra | Inspect (bash, non-mutating) |
+| `plan` | Planning and design decisions | GPT-6 Astra | Inspect (bash, non-mutating) |
 | `default` | Implementation and useful handoffs without a specialist | DeepSeek V4.1 Flash | Read, shell, edit, write |
 | `commit` | Intentional commits, only when requested | GPT-6 Luna | Read and shell |
 | `setup-wt` | Task worktree and workspace setup, no implementation | GPT-6 Luna | Read and shell |
@@ -86,7 +86,7 @@ Background calls return a job name and UUID and report results and questions to 
 
 `/agents` opens the live dashboard, newest jobs first, with status, start/end times, duration, and timelines. Use `j/k` to select, Enter to inspect the transcript, `i` to send guidance or answer a question, and `x` to abort, including waiting jobs. The inspector shows usage, cost, context occupancy, conversation ID, and queued guidance. Press `o` to load another 100 history entries. `c` opens configuration and `p` switches presets. `/agents <job-name-or-id>` opens a job directly. RPC clients retain native dialogs. The editor widget shows recent background jobs, questions, stalled activity, and completion counts.
 
-There can be four running jobs per parent session and one mutating child per working tree. Shell access counts as mutating. Do not edit the same working tree while a mutating child owns it. Independent mutating work belongs in separate worktrees. Foreground cancellation stops its job; cancelling a wait for a background job leaves that job running.
+There can be four running jobs per parent session and one mutating child per working tree. Shell access counts as mutating unless the agent sets `"mutating": false`, as `review` and `plan` do. Do not edit the same working tree while a mutating child owns it. Independent mutating work belongs in separate worktrees. Foreground cancellation stops its job; cancelling a wait for a background job leaves that job running.
 
 Jobs have a 30-minute active-time limit by default, including elapsed active time before a restart but excluding time parked for a parent answer. A minute without activity marks a job stalled; five minutes cancels it. Provider requests have a two-minute timeout, and each coding tool has an independent three-minute timeout. Mutation ownership remains held until tool execution actually stops. Output is capped at 300 lines or 32 KiB; reports include the database and conversation ID when truncated. Each conversation records its own token usage and cost. Context occupancy uses the last reported model usage, not a live tokenizer. Foreground tool results also report usage to the parent session.
 

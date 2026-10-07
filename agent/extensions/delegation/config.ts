@@ -14,6 +14,8 @@ export type AgentConfig = {
   tools: string[];
   skills?: string[];
   timeoutMinutes?: number;
+  // Overrides tool-based inference; inspection agents with bash set false to skip the working-tree lock.
+  mutating?: boolean;
 };
 type Config = { agents: Record<string, AgentConfig>; preset?: string; presets?: Record<string, Record<string, Partial<AgentConfig>>> };
 let sessionPreset: string | undefined;
@@ -39,7 +41,7 @@ function mergedConfig(): Config {
   const local = configPath() === defaultsPath ? {} : readConfig(configPath());
   const agents: Record<string, AgentConfig> = { ...defaults.agents, default: { ...defaults.agents.default, ...local.agents?.default } };
   for (const [name, config] of Object.entries(local.agents ?? {})) {
-    if (!object(config) || Object.keys(config).some((key) => !["model", "thinking", "description", "instructions", "tools", "skills", "timeoutMinutes"].includes(key))) throw new Error(`Invalid agent "${name}"`);
+    if (!object(config) || Object.keys(config).some((key) => !["model", "thinking", "description", "instructions", "tools", "skills", "timeoutMinutes", "mutating"].includes(key))) throw new Error(`Invalid agent "${name}"`);
     agents[name] = { ...(agents[name] ?? agents.default), ...config };
   }
   const presets = { ...defaults.presets };
@@ -75,7 +77,8 @@ export function getAgents(): Record<string, AgentConfig> {
         !THINKING_LEVELS.includes(agent.thinking) || typeof agent.description !== "string" || typeof agent.instructions !== "string" ||
         !Array.isArray(agent.tools) || agent.tools.some((tool) => !TOOL_NAMES.includes(tool as any)) ||
         (agent.skills !== undefined && (!Array.isArray(agent.skills) || agent.skills.some((skill) => typeof skill !== "string"))) ||
-        (agent.timeoutMinutes !== undefined && (!Number.isFinite(agent.timeoutMinutes) || agent.timeoutMinutes <= 0 || agent.timeoutMinutes > 120))) {
+        (agent.timeoutMinutes !== undefined && (!Number.isFinite(agent.timeoutMinutes) || agent.timeoutMinutes <= 0 || agent.timeoutMinutes > 120)) ||
+        (agent.mutating !== undefined && typeof agent.mutating !== "boolean")) {
       throw new Error(`Invalid configuration for agent "${name}" in ${configPath()}`);
     }
     agents[name] = agent;

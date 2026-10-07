@@ -27,7 +27,11 @@ test("named agents have a general-purpose default and safe specialist tool sets"
   const agents = getAgents();
   assert.deepEqual(Object.keys(agents), ["explore", "review", "plan", "default", "setup-wt", "commit"]);
   assert.equal(resolveAgent().model, agents.default.model);
-  for (const name of ["explore", "review", "plan"]) assert.deepEqual(agents[name].tools, ["read", "grep", "find", "ls"]);
+  assert.deepEqual(agents.explore.tools, ["read", "grep", "find", "ls"]);
+  for (const name of ["review", "plan"]) {
+    assert.deepEqual(agents[name].tools, ["read", "grep", "find", "ls", "bash"]);
+    assert.equal(agents[name].mutating, false);
+  }
   assert.ok(agents.default.tools.includes("edit"));
   assert.equal(validateRoute(agents.default.model, agents.default.thinking).allowed, true);
 });
@@ -108,7 +112,7 @@ test("native model configuration persists in the active preset without replacing
 test("malformed configuration and unknown presets fail closed", (t) => {
   const directory = setup(t);
   const file = join(directory, "agents.json");
-  for (const content of ["{", '{"agents":null}', '{"agents":{"explore":{"thinking":"typo"}}}', '{"agents":{"default":{"tools":["agent"]}}}', '{"agents":{"default":{"timeoutMinutes":-1}}}']) {
+  for (const content of ["{", '{"agents":null}', '{"agents":{"explore":{"thinking":"typo"}}}', '{"agents":{"default":{"tools":["agent"]}}}', '{"agents":{"default":{"timeoutMinutes":-1}}}', '{"agents":{"review":{"mutating":"no"}}}']) {
     writeFileSync(file, content);
     assert.throws(getAgents);
   }

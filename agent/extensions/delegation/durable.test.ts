@@ -252,7 +252,9 @@ test("concurrent read-only fanout is capped; mutation locks cover symlinks and s
   const writer = await jobs.spawn("default", { ...config, tools: ["write"] }, "write", cwd, true);
   await assert.rejects(jobs.spawn("default", { ...config, tools: ["bash"] }, "write", join(cwd, "nested"), true), /mutating agent/);
   await assert.rejects(jobs.spawn("default", { ...config, tools: ["edit"] }, "write", join(cwd, "alias"), true), /mutating agent/);
-  const readers = await Promise.all(Array.from({ length: 3 }, () => jobs.spawn("explore", config, "read", cwd, true)));
+  const reviewer = await jobs.spawn("review", { ...config, tools: ["bash"], mutating: false }, "inspect", cwd, true);
+  assert.equal(reviewer.mutating, false);
+  const readers = [reviewer, ...await Promise.all(Array.from({ length: 2 }, () => jobs.spawn("explore", config, "read", cwd, true)))];
   await assert.rejects(jobs.spawn("explore", config, "fifth", cwd, true), /four/);
   await Promise.all([writer, ...readers].map((job) => jobs.cancel(job.id)));
   assert.ok((await jobs.list()).every((job) => job.status === "cancelled"));

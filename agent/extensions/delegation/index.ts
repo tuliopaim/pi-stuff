@@ -15,7 +15,7 @@ import { activeJob, elapsed, jobColor, jobSummary, pendingJob, shortPaths, statu
 
 const SHORTCUTS = {
   scout: { agent: "explore", description: "Delegate focused, read-only codebase reconnaissance to a cheaper model.", guidelines: ["Default to direct inspection. Use scout only for one narrow question that needs more than 2-3 files. Verify only evidence needed for edits. Do not use it for implementation or repeat completed exploration."] },
-  review: { agent: "review", description: "Delegate focused, read-only code review to a high-reasoning model.", guidelines: ["Use review only when explicitly requested or when a high-risk change needs independent review. Supply exact scope and intended behavior. Verify findings before acting. Review once unless new code is added."] },
+  review: { agent: "review", description: "Delegate focused code review to a high-reasoning model that can inspect git history but does not edit.", guidelines: ["Use review only when explicitly requested or when a high-risk change needs independent review. Supply exact scope, such as a base commit or range, and intended behavior. Verify findings before acting. Review once unless new code is added."] },
   commit: { agent: "commit", description: "Delegate completed-work analysis and intentional git commits to a specialized model.", guidelines: ["Use commit only when the user explicitly requests commits. Pass scope and splitting instructions. The child owns inspection, staging, and commits."] },
 } as const;
 

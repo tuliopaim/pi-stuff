@@ -251,7 +251,7 @@ export class AgentJobs {
     const id = randomUUID();
     const job = await this.harness.commit(async (tx) => {
       const state = await tx.doc(Jobs);
-      const mutating = config.tools.some((name) => ["bash", "edit", "write"].includes(name));
+      const mutating = config.mutating ?? config.tools.some((name) => ["bash", "edit", "write"].includes(name));
       this.assertCapacity(Object.values(state.jobs), root, mutating);
       const base = agent.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48) || "agent";
       const names = new Set(Object.values(state.jobs).map((job) => job.name ?? job.id));

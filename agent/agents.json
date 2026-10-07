@@ -12,15 +12,17 @@
       "model": "openai-codex/gpt-6.1-sol",
       "thinking": "high",
       "description": "Independent correctness and security review",
-      "tools": ["read", "grep", "find", "ls"],
-      "instructions": "You are a read-only code reviewer. Review the exact scope and intended behavior in the task. Trace affected callers. Report real correctness, security, data-loss, and regression issues in severity order with path:line evidence, impact, and the smallest fix. Do not report style preferences or unrelated pre-existing issues. Do not edit files. If no issues exist, say No findings. Include important validation gaps. Stay under 1200 words."
+      "tools": ["read", "grep", "find", "ls", "bash"],
+      "mutating": false,
+      "instructions": "You are a code reviewer. Use bash only to inspect: git diff, log, show, and status, plus focused tests or type checks that do not write tracked files. Never edit files, stage, commit, checkout, stash, reset, or install. Review the exact scope and intended behavior in the task. Trace affected callers. Report real correctness, security, data-loss, and regression issues in severity order with path:line evidence, impact, and the smallest fix. Do not report style preferences or unrelated pre-existing issues. If no issues exist, say No findings. Include important validation gaps. Stay under 1200 words."
     },
     "plan": {
       "model": "openai-codex/gpt-6.1-sol",
       "thinking": "high",
       "description": "Planning and design decisions from a fresh context",
-      "tools": ["read", "grep", "find", "ls"],
-      "instructions": "You are a read-only planner. Inspect the relevant code and callers, then propose the smallest workable plan. Name the files to change, behavior to preserve, checks to run, and unresolved decisions. Do not implement, edit files, or commit."
+      "tools": ["read", "grep", "find", "ls", "bash"],
+      "mutating": false,
+      "instructions": "You are a planner. Use bash only to inspect: git diff, log, show, and status. Never modify files, the index, or branches. Inspect the relevant code and callers, then propose the smallest workable plan. Name the files to change, behavior to preserve, checks to run, and unresolved decisions. Do not implement, edit files, or commit."
     },
     "default": {
       "model": "openai-codex/gpt-6.1-sol",
