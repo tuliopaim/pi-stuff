@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +11,7 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { MemoryStorage } from "@earendil-works/pi-durable";
 import { AgentSession } from "@earendil-works/pi-coding-agent";
+import tripleEscape from "../triple-escape.ts";
 
 const plainTheme = { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text, bold: (text: string) => text };
 const widgetContent = (content: any) => typeof content === "function" ? content({}, plainTheme).render(120) : content;
@@ -22,15 +24,70 @@ function harness(t: test.TestContext, createJobs?: any) {
   t.after(() => { if (old === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = old; setSubagentPreset(undefined); rmSync(directory, { recursive: true, force: true }); });
   const tools = new Map<string, any>(), commands = new Map<string, any>(), events = new Map<string, any>(), renderers = new Map<string, any>();
   const sent: any[] = [], persisted: any[] = [];
+  const emitter = new EventEmitter();
+  const bus = {
+    emit: (name: string, data: unknown) => { emitter.emit(name, data); },
+    on: (name: string, handler: (data: unknown) => void) => {
+      emitter.on(name, handler);
+      return () => { emitter.off(name, handler); };
+    },
+  };
   delegation({
+    events: bus,
     registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: (name: string, command: any) => commands.set(name, command),
     registerMessageRenderer: (name: string, renderer: any) => renderers.set(name, renderer), on: (name: string, handler: any) => events.set(name, handler),
     sendMessage: (message: any, options: any) => { sent.push({ message, options }); persisted.push({ type: "custom_message", ...message }); },
     appendEntry: () => {},
     getActiveTools: () => [...tools.keys()],
   } as any, createJobs);
-  return { tools, commands, events, renderers, sent, persisted };
+  return { tools, commands, events, renderers, sent, persisted, bus };
 }
+
+test("triple Escape cancels pending subagents even when the parent is idle", async (t) => {
+  const entries = ["running", "stalled", "waiting", "done"].map((status) => ({
+    id: status, agent: "default", status, background: true, delivered: true,
+  }));
+  const cancelled: string[] = [];
+  const manager = {
+    list: async () => entries, subscribe: () => () => {}, resume: async () => {}, close: async () => {},
+    cancel: async (id: string) => { cancelled.push(id); },
+  };
+  const { events, bus, persisted } = harness(t, async () => manager);
+  let editor: any;
+  let parentInterrupts = 0;
+  tripleEscape({
+    events: bus,
+    on: (_name: string, handler: any) => {
+      handler({}, { mode: "tui", ui: { setEditorComponent: (factory: any) => {
+        editor = factory({ requestRender() {} }, {}, {
+          matches: (data: string, action: string) => data === "\x1b" && action === "app.interrupt",
+        });
+        editor.onEscape = () => { parentInterrupts++; };
+      } } });
+    },
+  } as any);
+  const ctx = {
+    mode: "tui", hasUI: true, modelRegistry: { find: () => {}, streamSimple: () => {} },
+    sessionManager: { getSessionId: () => "session", getSessionFile: () => undefined, getBranch: () => persisted },
+    ui: { theme: plainTheme, setStatus() {}, setWidget() {}, notify() {} },
+  };
+  await events.get("session_start")({}, ctx);
+  t.after(() => events.get("session_shutdown")({}, ctx));
+  editor.handleInput("\x1b");
+  editor.handleInput("\x1b");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(cancelled, []);
+  editor.handleInput("\x1b");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(parentInterrupts, 1);
+  assert.deepEqual(cancelled.sort(), ["running", "stalled", "waiting"]);
+  await events.get("session_shutdown")({}, ctx);
+  editor.handleInput("\x1b");
+  editor.handleInput("\x1b");
+  editor.handleInput("\x1b");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(cancelled.length, 3, "shutdown removes the cancellation listener");
+});
 
 test("one management tool plus focused shortcuts replace the old tool family", (t) => {
   const registered = harness(t);
@@ -39,6 +96,25 @@ test("one management tool plus focused shortcuts replace the old tool family", (
   assert.equal(registered.tools.get("agent").exposure, "model-only");
   assert.match(registered.tools.get("agent").description, /Omit agent to use default/);
   assert.ok(!registered.tools.has("subagent_spawn"));
+});
+
+test("live agents have one footer status without a duplicate monitor widget", async (t) => {
+  const statuses: any[] = [], widgets: any[] = [];
+  const manager = {
+    list: async () => [{ id: "one", agent: "default", status: "running", background: true, startedAt: Date.now() }],
+    subscribe: () => () => {}, resume: async () => {}, close: async () => {},
+  };
+  const { events, persisted } = harness(t, async () => manager);
+  const ctx = {
+    hasUI: true, modelRegistry: { find: () => {}, streamSimple: () => {} },
+    sessionManager: { getSessionId: () => "session", getSessionFile: () => undefined, getBranch: () => persisted },
+    ui: { theme: plainTheme, setStatus: (name: string, content: any) => statuses.push({ name, content }),
+      setWidget: (name: string, content: any) => widgets.push({ name, content }), notify: () => {} },
+  };
+  t.after(() => events.get("session_shutdown")({}, ctx));
+  await events.get("session_start")({}, ctx);
+  assert.match(statuses.at(-1).content, /1 running.*\/agents/);
+  assert.ok(widgets.every(({ content }) => content === undefined), "live status must not be repeated above the editor");
 });
 
 test("delegated workflow children never register orchestration tools", (t) => {

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { AssistantMessageComponent, ToolExecutionComponent, createBashToolDefinition, initTheme } from "@earendil-works/pi-coding-agent";
 import { Dashboard, timelineBar } from "./dashboard.ts";
 import { jobActivity, terminalText } from "./presentation.ts";
 import type { Job } from "./durable.ts";
@@ -11,6 +12,7 @@ const job = (id: string, status: Job["status"] = "running"): Job => ({ id, agent
 const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
 const keys = { matches: (data: string, key: string) => data === key };
 const tick = () => new Promise((resolve) => setTimeout(resolve, 120));
+initTheme("dark");
 
 test("dashboard lists live jobs, preserves selection, inspects, messages, cancels, and fits narrow terminals", async (t) => {
   let entries = [job("one"), job("two", "done")];
@@ -91,10 +93,74 @@ test("newest jobs open first and long titles keep a gap before status", async (t
   assert.match(text, /Z[ …]+done/);
   const narrow = terminalText(dashboard.render(60).join("\n"));
   assert.match(narrow, /done/);
-  assert.match(narrow, /00:00:02/);
+  assert.ok(narrow.includes(new Date(2000).toLocaleTimeString("en-GB", { hour12: false })));
 });
 
 test("question previews cannot emit terminal controls or embedded newlines", () => {
   const entry = { ...job("one", "waiting"), question: { id: "q", requestId: "one", askedAt: 1, text: "Choose?\nSecond line\x1b]52;c;SGVsbG8=\x07" } };
   assert.equal(jobActivity(entry), "? Choose? Second line");
+});
+
+test("inspector uses native session cards and independent tool and thinking shortcuts", async (t) => {
+  const command = `python3 ${"long/path/".repeat(35)}command-end`;
+  const output = `Result ${"界".repeat(80)} output-end`;
+  const result = { role: "toolResult", toolCallId: "call", toolName: "bash", content: [{ type: "text", text: `hidden-first-result\n${output}\nsecond\nthird\nfourth-result-line` }], isError: false };
+  const assistant = { role: "assistant", content: [
+    { type: "thinking", thinking: "Private reasoning" },
+    { type: "toolCall", id: "call", name: "bash", arguments: { command } },
+  ] };
+  const tui = { terminal: { rows: 80 }, requestRender: () => {} } as any;
+  const manager = {
+    list: async () => [job("one")], subscribe: () => () => {}, preview: () => "",
+    transcript: async () => [assistant, result],
+  };
+  const dashboard = new Dashboard(tui, theme as any, keys as any, manager as any, () => {}, "one");
+  t.after(() => dashboard.dispose());
+  await tick();
+  const compact = terminalText(dashboard.render(60).join("\n"));
+  const nativeTool = new ToolExecutionComponent("bash", "call", { command }, { showImages: false }, createBashToolDefinition("/repo"), tui, "/repo");
+  nativeTool.updateResult(result);
+  assert.ok(compact.includes(terminalText(nativeTool.render(60).join("\n"))), "tool card must match Pi's native renderer");
+  assert.ok(compact.includes(terminalText(new AssistantMessageComponent(assistant as any, true).render(60).join("\n"))));
+  assert.doesNotMatch(compact, /Private reasoning/);
+  assert.match(compact.replace(/\n/g, ""), /command-end/);
+  assert.match(compact, /output-end/);
+  assert.doesNotMatch(compact, /hidden-first-result/);
+  assert.equal(compact.split("fourth-result-line").length - 1, 1, "result belongs in the call card, not a second block");
+  dashboard.handleInput("app.tools.expand");
+  const expanded = terminalText(dashboard.render(60).join("\n"));
+  assert.match(expanded, /hidden-first-result/);
+  assert.doesNotMatch(expanded, /Private reasoning/);
+  dashboard.handleInput("app.thinking.toggle");
+  assert.match(terminalText(dashboard.render(60).join("\n")), /Private reasoning/);
+  for (const width of [1, 20, 60, 120]) assert.ok(dashboard.render(width).every((line) => !line.includes("\n") && visibleWidth(line) <= width));
+});
+
+test("native inspector retains orphan results, tool failures, aborted calls, and live updates", async (t) => {
+  let listener: (() => void) | undefined;
+  let answer = "First live answer";
+  const manager = {
+    list: async () => [job("one")],
+    subscribe: (fn: () => void) => { listener = fn; return () => {}; }, preview: () => "",
+    transcript: async () => [
+      { role: "toolResult", toolName: "read", toolCallId: "older-call", content: [{ type: "text", text: "Older result retained" }] },
+      { role: "assistant", content: [{ type: "toolCall", id: "failed", name: "bash", arguments: { command: "false" } }] },
+      { role: "toolResult", toolName: "bash", toolCallId: "failed", isError: true, content: [{ type: "text", text: "Command exited with code 1" }] },
+      { role: "assistant", stopReason: "aborted", content: [{ type: "toolCall", id: "aborted", name: "bash", arguments: { command: "sleep 10" } }] },
+      { role: "assistant", content: [{ type: "text", text: answer }] },
+    ],
+  };
+  const dashboard = new Dashboard({ terminal: { rows: 60 }, requestRender: () => {} } as any, theme as any, keys as any, manager as any, () => {}, "one");
+  t.after(() => dashboard.dispose());
+  await tick();
+  const text = terminalText(dashboard.render(100).join("\n"));
+  assert.match(text, /Older result retained/);
+  assert.match(text, /Command exited with code 1/);
+  assert.match(text, /Operation aborted/);
+  assert.match(text, /First live answer/);
+  answer = "Updated live answer"; listener!(); await tick();
+  const updated = terminalText(dashboard.render(100).join("\n"));
+  assert.match(updated, /Updated live answer/);
+  assert.doesNotMatch(updated, /First live answer/);
+  assert.equal(updated.split("Command exited with code 1").length - 1, 1);
 });

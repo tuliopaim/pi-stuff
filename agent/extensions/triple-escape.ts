@@ -45,14 +45,17 @@ export class ConsecutivePressGate {
 class TripleEscapeEditor extends CustomEditor {
   private readonly interruptGate = new ConsecutivePressGate();
   private readonly appKeybindings: KeybindingsManager;
+  private readonly interruptChildren: () => void;
 
   constructor(
     tui: TUI,
     theme: EditorTheme,
     appKeybindings: KeybindingsManager,
+    interruptChildren: () => void,
   ) {
     super(tui, theme, appKeybindings);
     this.appKeybindings = appKeybindings;
+    this.interruptChildren = interruptChildren;
   }
 
   override handleInput(data: string) {
@@ -68,7 +71,10 @@ class TripleEscapeEditor extends CustomEditor {
       return;
     }
 
-    if (this.interruptGate.press()) super.handleInput(data);
+    if (this.interruptGate.press()) {
+      this.interruptChildren();
+      super.handleInput(data);
+    }
   }
 }
 
@@ -76,7 +82,7 @@ export default function tripleEscape(pi: ExtensionAPI) {
   pi.on("session_start", (_event, ctx) => {
     if (ctx.mode !== "tui") return;
     ctx.ui.setEditorComponent(
-      (tui, theme, keybindings) => new TripleEscapeEditor(tui, theme, keybindings),
+      (tui, theme, keybindings) => new TripleEscapeEditor(tui, theme, keybindings, () => pi.events.emit("subagents:interrupt", undefined)),
     );
   });
 }

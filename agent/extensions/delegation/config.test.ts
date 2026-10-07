@@ -25,11 +25,20 @@ function setup(t: test.TestContext) {
 test("named agents have a general-purpose default and safe specialist tool sets", (t) => {
   setup(t);
   const agents = getAgents();
-  assert.deepEqual(Object.keys(agents), ["explore", "review", "plan", "default", "commit"]);
+  assert.deepEqual(Object.keys(agents), ["explore", "review", "plan", "default", "setup-wt", "commit"]);
   assert.equal(resolveAgent().model, agents.default.model);
   for (const name of ["explore", "review", "plan"]) assert.deepEqual(agents[name].tools, ["read", "grep", "find", "ls"]);
   assert.ok(agents.default.tools.includes("edit"));
   assert.equal(validateRoute(agents.default.model, agents.default.thinking).allowed, true);
+});
+
+test("worktree setup uses Luna and shell tools without implementation tools", (t) => {
+  setup(t);
+  const agent = resolveAgent("setup-wt");
+  assert.equal(agent.model, "openai-codex/gpt-6-luna");
+  assert.equal(agent.thinking, "medium");
+  assert.deepEqual(agent.tools, ["read", "grep", "find", "ls", "bash"]);
+  assert.match(agent.instructions, /setup-wt\/SKILL\.md/);
 });
 
 test("partial custom agents inherit default behavior and overrides keep specialist tools", (t) => {

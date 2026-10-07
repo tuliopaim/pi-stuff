@@ -1,9 +1,9 @@
-import { getMarkdownTheme, type ExtensionContext, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
+import { AssistantMessageComponent, UserMessageComponent, ToolExecutionComponent, createBashToolDefinition, createReadToolDefinition, createEditToolDefinition, createWriteToolDefinition, createGrepToolDefinition, createFindToolDefinition, createLsToolDefinition, getMarkdownTheme, type ExtensionContext, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
 import type { Message } from "@earendil-works/pi-ai";
-import { Input, Markdown, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type Focusable, type TUI } from "@earendil-works/pi-tui";
+import { Input, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type Focusable, type TUI } from "@earendil-works/pi-tui";
 import type { AgentJobs, Job, JobMetadata } from "./durable.ts";
 import { getActiveSubagentPresetName, getAgents } from "./config.ts";
-import { activeJob, elapsed, jobActivity, jobColor as color, jobSummary, jobTitle, pendingJob, terminalText, toolSummary } from "./presentation.ts";
+import { activeJob, elapsed, jobActivity, jobColor as color, jobSummary, jobTitle, pendingJob, terminalText } from "./presentation.ts";
 
 type Theme = ExtensionContext["ui"]["theme"];
 type Action = "configure" | "preset" | undefined;
@@ -12,6 +12,10 @@ const pad = (text: string, width: number) => {
   return clipped + " ".repeat(Math.max(0, width - visibleWidth(clipped)));
 };
 const clock = (time?: number) => time === undefined ? "--:--:--" : new Date(time).toLocaleTimeString("en-GB", { hour12: false });
+const toolDefinitions = {
+  bash: createBashToolDefinition, read: createReadToolDefinition, edit: createEditToolDefinition,
+  write: createWriteToolDefinition, grep: createGrepToolDefinition, find: createFindToolDefinition, ls: createLsToolDefinition,
+};
 
 export function timelineBar(job: Job, start: number, end: number, width: number) {
   const cells = Array<string>(Math.max(3, width)).fill(" ");
@@ -29,10 +33,13 @@ export class Dashboard implements Component, Focusable {
   private index = 0;
   private detailId?: string;
   private messages: Message[] = [];
+  private transcript: Component[] = [];
   private metadata?: JobMetadata;
   private metadataId?: string;
   private historyLimit = 100;
   private offset = 0;
+  private toolsExpanded = false;
+  private hideThinking = true;
   private input = new Input();
   private inputMode = false;
   private _focused = false;
@@ -67,7 +74,7 @@ export class Dashboard implements Component, Focusable {
   }
 
   dispose() { this.closed = true; this.unsubscribe?.(); clearInterval(this.timer); if (this.refreshTimer) clearTimeout(this.refreshTimer); }
-  invalidate() { this.input.invalidate(); }
+  invalidate() { this.input.invalidate(); for (const component of this.transcript) component.invalidate(); }
   private scheduleRefresh() {
     if (this.closed || this.refreshTimer) return;
     this.refreshTimer = setTimeout(() => { this.refreshTimer = undefined; void this.refresh(); }, 100);
@@ -90,7 +97,10 @@ export class Dashboard implements Component, Focusable {
         const canonical = resolved?.id ?? id;
         const [messages, metadata] = await Promise.all([detail ? this.jobs.transcript(canonical, this.historyLimit) : undefined, this.jobs.metadata?.(canonical)]);
         if (!this.closed && (this.detailId ?? this.selectedId) === id) {
-          if (detail) { this.detailId = canonical; this.messages = messages ?? []; }
+          if (detail) {
+            this.detailId = canonical; this.messages = messages ?? [];
+            this.buildTranscript(resolved?.cwd ?? "");
+          }
           this.metadata = metadata; this.metadataId = canonical;
         }
       }
@@ -107,6 +117,46 @@ export class Dashboard implements Component, Focusable {
     this.tui.requestRender();
   }
 
+  private buildTranscript(cwd: string) {
+    const components: Component[] = [];
+    const tools = new Map<string, ToolExecutionComponent>();
+    const cleanContent = (content: Message["content"]) => typeof content === "string" ? terminalText(content) :
+      content.map((part) => part.type === "text" ? { ...part, text: terminalText(part.text) } :
+        part.type === "thinking" ? { ...part, thinking: terminalText(part.thinking) } : part);
+    for (const message of this.messages) {
+      if (message.role === "user") {
+        const text = typeof message.content === "string" ? message.content :
+          message.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("\n");
+        components.push(new UserMessageComponent(terminalText(text), getMarkdownTheme()));
+      } else if (message.role === "assistant") {
+        components.push(new AssistantMessageComponent({ ...message, content: cleanContent(message.content) as typeof message.content }, this.hideThinking));
+        for (const part of message.content) if (part.type === "toolCall") {
+          const args = Object.fromEntries(Object.entries(part.arguments).map(([key, value]) => [key, typeof value === "string" ? terminalText(value) : value]));
+          const factory = toolDefinitions[part.name as keyof typeof toolDefinitions];
+          const tool = new ToolExecutionComponent(part.name, part.id, args, { showImages: false }, factory?.(cwd), this.tui, cwd);
+          // This is a replay, not an execution. Do not mark args complete:
+          // edit's live preview would otherwise read the current working tree.
+          tool.setExpanded(this.toolsExpanded);
+          if (message.stopReason === "aborted" || message.stopReason === "error") {
+            tool.updateResult({ content: [{ type: "text", text: terminalText(message.errorMessage || (message.stopReason === "aborted" ? "Operation aborted" : "Error")) }], isError: true });
+          }
+          tools.set(part.id, tool);
+          components.push(tool);
+        }
+      } else if (message.role === "toolResult") {
+        let tool = tools.get(message.toolCallId);
+        if (!tool) {
+          // Older-history windows can start with the result of a call outside the window.
+          tool = new ToolExecutionComponent(message.toolName, message.toolCallId, {}, { showImages: false }, undefined, this.tui, cwd);
+          tool.setExpanded(this.toolsExpanded);
+          components.push(tool);
+        }
+        tool.updateResult({ ...message, content: cleanContent(message.content) as typeof message.content, isError: message.isError ?? false });
+      }
+    }
+    this.transcript = components;
+  }
+
   handleInput(data: string) {
     const matches = (key: Parameters<KeybindingsManager["matches"]>[1]) => this.keys.matches(data, key);
     if (this.inputMode) {
@@ -116,7 +166,7 @@ export class Dashboard implements Component, Focusable {
     }
     if (matches("tui.select.cancel") || matches("tui.editor.cursorLeft") || data === "h") {
       if (!this.detailId) return this.done(undefined);
-      this.detailId = undefined; this.messages = []; this.metadata = undefined; this.historyLimit = 100; this.error = undefined;
+      this.detailId = undefined; this.messages = []; this.transcript = []; this.metadata = undefined; this.historyLimit = 100; this.error = undefined;
     } else if (!this.detailId && (data === "c" || data === "p")) return this.done(data === "c" ? "configure" : "preset");
     else if (data === "x") {
       const job = this.entries.find((job) => job.id === (this.detailId ?? this.selectedId));
@@ -130,9 +180,18 @@ export class Dashboard implements Component, Focusable {
       else if (data === "g") this.offset = Number.MAX_SAFE_INTEGER;
       else if (data === "G") this.offset = 0;
       else if (data === "o") { this.historyLimit += 100; this.scheduleRefresh(); }
+      else if (matches("app.tools.expand")) {
+        this.toolsExpanded = !this.toolsExpanded;
+        for (const component of this.transcript) if (component instanceof ToolExecutionComponent) component.setExpanded(this.toolsExpanded);
+        this.offset = 0;
+      } else if (matches("app.thinking.toggle")) {
+        this.hideThinking = !this.hideThinking;
+        for (const component of this.transcript) if (component instanceof AssistantMessageComponent) component.setHideThinkingBlock(this.hideThinking);
+        this.offset = 0;
+      }
     } else {
       if (matches("tui.select.confirm") || matches("tui.editor.cursorRight") || data === "l") {
-        this.detailId = this.selectedId; this.offset = 0; this.messages = []; this.scheduleRefresh();
+        this.detailId = this.selectedId; this.offset = 0; this.messages = []; this.transcript = []; this.scheduleRefresh();
       } else if (matches("tui.select.up") || data === "k") this.index = (this.index - 1 + this.entries.length) % Math.max(1, this.entries.length);
       else if (matches("tui.select.down") || data === "j") this.index = (this.index + 1) % Math.max(1, this.entries.length);
       else if (data === "g") this.index = 0;
@@ -179,34 +238,19 @@ export class Dashboard implements Component, Focusable {
     return lines;
   }
   private renderDetail(job: Job, width: number) {
-    const theme = this.theme, body: string[] = [];
-    for (const message of this.messages) {
-      if (message.role === "assistant") {
-        for (const part of message.content) {
-          if (part.type === "text") body.push(...new Markdown(terminalText(part.text), 0, 0, getMarkdownTheme()).render(width), "");
-          else if (part.type === "thinking") body.push(theme.fg("dim", `Thinking · ${terminalText(part.thinking).replace(/\s+/g, " ").slice(-240)}`));
-          else if (part.type === "toolCall") body.push(theme.fg("toolTitle", `› ${toolSummary(part.name, part.arguments)}`));
-        }
-      } else {
-        const text = terminalText(typeof message.content === "string" ? message.content : message.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("\n"));
-        if (message.role === "user") body.push(theme.fg("accent", "Task"), ...wrapTextWithAnsi(text, Math.max(1, width)), "");
-        else if (message.role === "toolResult") {
-          const all = text.split("\n");
-          body.push(...all.slice(0, 3).map((line) => theme.fg(message.isError ? "error" : "dim", `  │ ${line}`)));
-          if (all.length > 3) body.push(theme.fg("dim", `  … ${all.length - 3} more lines`));
-        }
-      }
-    }
+    const theme = this.theme, body = this.transcript.flatMap((component) => component.render(width));
+    const wrap = (text: string, color: Parameters<Theme["fg"]>[0]) =>
+      wrapTextWithAnsi(text, Math.max(1, width)).map((line) => theme.fg(color, line));
     // The transcript already contains partial assistant text. Show only the
     // current tool/retry state here, not a second copy of the streamed answer.
     const activity = jobActivity(job, this.jobs?.preview(job.id));
-    if (activeJob(job) && (!this.messages.length || /^(Running |Retrying:|Compacting context|Waiting for model|Stalled)/.test(activity))) body.push(theme.fg("muted", activity));
+    if (activeJob(job) && (!this.messages.length || /^(Running |Retrying:|Compacting context|Waiting for model|Stalled)/.test(activity))) body.push(...wrap(activity, "muted"));
     for (const item of this.metadata?.queued ?? []) if (item.mode !== "write") {
       const content = typeof item.content === "string" ? item.content : JSON.stringify(item.content);
-      body.push(theme.fg("warning", `Guidance queued · ${terminalText(content)}`));
+      body.push(...wrap(`Guidance queued · ${terminalText(content)}`, "warning"));
     }
     if (job.question) body.push(...wrapTextWithAnsi(theme.fg("warning", `Question for parent · ${terminalText(job.question.text)}`), Math.max(1, width)));
-    if (job.error) body.push(theme.fg("error", terminalText(job.error)));
+    if (job.error) body.push(...wrap(terminalText(job.error), "error"));
     const height = this.height();
     this.offset = Math.min(this.offset, Math.max(0, body.length - height));
     const end = body.length - this.offset;
@@ -218,7 +262,7 @@ export class Dashboard implements Component, Focusable {
       theme.fg("dim", `Conversation ${job.conversationId} · latest ${this.historyLimit} entries${this.offset ? ` · ${this.offset} lines below` : ""}`),
       theme.fg("border", "─".repeat(width)), ...shown,
       ...(this.inputMode ? [theme.fg("accent", job.status === "waiting" ? "Answer the child's question" : "Send guidance or follow-up"), ...this.input.render(width)] : []),
-      theme.fg("dim", this.inputMode ? "enter send · esc cancel" : `j/k scroll · g/G top/bottom · o older · i/enter ${job.status === "waiting" ? "answer" : "message"} · esc/h back${pendingJob(job) ? " · x abort" : ""}`)];
+      theme.fg("dim", this.inputMode ? "enter send · esc cancel" : `ctrl+o expand · ctrl+t thinking · i ${job.status === "waiting" ? "answer" : "message"} · esc back · j/k scroll · g/G top/bottom · o older${pendingJob(job) ? " · x abort" : ""}`)];
   }
 }
 

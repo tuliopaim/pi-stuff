@@ -11,7 +11,7 @@ import { configPath, getActiveSubagentPresetName, getAgents, getSubagentPresetNa
 import { AgentJobs, modelsFromRegistry, type Job, type JobResult } from "./durable.ts";
 import { registerDynamicRouteGuidance } from "./runtime.ts";
 import { showAgents } from "./dashboard.ts";
-import { activeJob, elapsed, jobColor, jobSummary, pendingJob, renderJobsWidget, shortPaths, statusCounts, terminalText } from "./presentation.ts";
+import { activeJob, elapsed, jobColor, jobSummary, pendingJob, shortPaths, statusCounts, terminalText } from "./presentation.ts";
 
 const SHORTCUTS = {
   scout: { agent: "explore", description: "Delegate focused, read-only codebase reconnaissance to a cheaper model.", guidelines: ["Default to direct inspection. Use scout only for one narrow question that needs more than 2-3 files. Verify only evidence needed for edits. Do not use it for implementation or repeat completed exploration."] },
@@ -87,6 +87,7 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
   let jobs: AgentJobs | undefined;
   let context: ExtensionContext | undefined;
   let unsubscribe: (() => void) | undefined;
+  let unsubscribeInterrupt: (() => void) | undefined;
   let updateTimer: ReturnType<typeof setTimeout> | undefined;
   let flushing = false;
   const pendingReports = new Set<string>();
@@ -115,12 +116,7 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
     if (current !== jobs) return;
     if (ctx.hasUI) {
       const theme = ctx.ui.theme;
-      ctx.ui.setStatus("subagents", entries.some(pendingJob) ? `${theme.fg("muted", "subagents:")} ${statusCounts(entries.filter(pendingJob), theme)}` : undefined);
-      const background = entries.filter((job) => job.background).sort((a, b) => Number(pendingJob(b)) - Number(pendingJob(a)) || (b.createdAt ?? b.startedAt) - (a.createdAt ?? a.startedAt)).slice(0, 4);
-      ctx.ui.setWidget("subagents-monitor", background.some(pendingJob) ? (_tui, theme) => ({
-        invalidate() {},
-        render: (width) => renderJobsWidget(background, statusCounts(background, theme), (id) => current.preview(id), theme, width),
-      }) : undefined);
+      ctx.ui.setStatus("subagents", entries.some(pendingJob) ? `${theme.fg("muted", "subagents:")} ${statusCounts(entries.filter(pendingJob), theme)} ${theme.fg("dim", "/agents")}` : undefined);
     }
     if (flushing) return;
     flushing = true;
@@ -163,6 +159,12 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
       ? { database: join(getAgentDir(), "subagents", `${ctx.sessionManager.getSessionId()}.sqlite`) }
       : { storage: new MemoryStorage() }) });
     unsubscribe = jobs.subscribe(scheduleUpdate);
+    const current = jobs;
+    unsubscribeInterrupt = pi.events.on("subagents:interrupt", () => {
+      void current.list().then((entries) =>
+        Promise.all(entries.filter(pendingJob).map((job) => current.cancel(job.id))),
+      ).catch((error) => ctx.ui.notify(String(error), "error"));
+    });
     await jobs.resume();
     await update();
   });
@@ -173,6 +175,7 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
   pi.on("message_end", scheduleUpdate);
   pi.on("session_shutdown", async (_event, ctx) => {
     unsubscribe?.(); unsubscribe = undefined;
+    unsubscribeInterrupt?.(); unsubscribeInterrupt = undefined;
     if (updateTimer) clearTimeout(updateTimer);
     updateTimer = undefined;
     const closing = jobs; jobs = undefined; context = undefined;
