@@ -20,9 +20,6 @@
     },
     "git:github.com/DietrichGebert/ponytail"
   ],
-  "skills": [
-    "~/dotfiles/skills"
-  ],
   "extensions": [
     "~/dotfiles/pi/agent/extensions"
   ],

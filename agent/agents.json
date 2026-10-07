@@ -34,7 +34,7 @@
       "thinking": "medium",
       "description": "Intentional commits, only when the user requests them",
       "tools": ["read", "grep", "find", "ls", "bash"],
-      "skills": ["~/dotfiles/skills/commit-work"],
+      "skills": ["~/dotfiles/skills/local/commit-work"],
       "instructions": "You are a specialized git commit agent. Read the commit-work skill and follow it exactly. Inspect all changes before staging, leave unrelated work uncommitted, never expose secrets, never amend or force push, and report each created commit's SHA and message."
     }
   },

@@ -133,7 +133,7 @@ Each workflow child supplies an explicit model and reasoning effort. Allowed pai
 
 `/implement-plan <path>` reads a Markdown plan, asks for confirmation, and starts a fresh Pi session containing the plan and repository files. Without a path, it checks names such as `plans/PLAN.md` and `plan.md`.
 
-Settings load prompts from `~/dotfiles/pi/agent/prompts`, skills from `~/dotfiles/skills`, and extensions from `~/dotfiles/pi/agent/extensions`. The local `web-tools` extension provides public web search and retrieval.
+Settings load prompts from `~/dotfiles/pi/agent/prompts` and extensions from `~/dotfiles/pi/agent/extensions`. Pi discovers shared skills through `~/.agents/skills`; see [skill ownership](../skills/README.md). Package-managed skills, including Ponytail, remain deliberate exceptions. The local `web-tools` extension provides public web search and retrieval.
 
 ## Files
 
