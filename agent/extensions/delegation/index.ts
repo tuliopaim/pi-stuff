@@ -11,7 +11,7 @@ import { configPath, getActiveSubagentPresetName, getAgents, getSubagentPresetNa
 import { AgentJobs, modelsFromRegistry, type Job, type JobResult } from "./durable.ts";
 import { registerDynamicRouteGuidance } from "./runtime.ts";
 import { showAgents } from "./dashboard.ts";
-import { activeJob, elapsed, jobColor, jobSummary, pendingJob, shortPaths, statusCounts, terminalText } from "./presentation.ts";
+import { activeJob, jobColor, jobSummary, pendingJob, shortPaths, statusCounts, terminalText } from "./presentation.ts";
 
 const SHORTCUTS = {
   scout: { agent: "explore", description: "Delegate focused, read-only codebase reconnaissance to a cheaper model.", guidelines: ["Default to direct inspection. Use scout only for one narrow question that needs more than 2-3 files. Verify only evidence needed for edits. Do not use it for implementation or repeat completed exploration."] },
@@ -25,7 +25,7 @@ export function formatResult(result: JobResult) {
   return `${job.name ?? job.agent} (${job.id}) [${job.status}]\n${jobSummary(job, result)}\n\n${result.output}${question}`;
 }
 
-type RenderContext = { expanded?: boolean; args?: { task?: string }; state?: { config?: AgentConfig; configKey?: string } };
+type RenderContext = { expanded?: boolean; hint?: string; toolCallId?: string; invalidate?: () => void; args?: { task?: string; action?: string; id?: string }; state?: { config?: AgentConfig; configKey?: string } };
 type Theme = ExtensionContext["ui"]["theme"];
 function renderCall(agent: string, args: { task?: string; route?: string; name?: string; background?: boolean; action?: string; id?: string }, theme: Theme, ctx?: RenderContext) {
   const key = JSON.stringify([agent, args.route]);
@@ -51,7 +51,7 @@ function renderResult(result: AgentToolResult<unknown>, options: ToolRenderResul
   const header = theme.fg(jobColor(job), `${job.name ?? job.agent} · ${job.status}`) + theme.fg("dim", ` · ${jobSummary(job, details)}`);
   if (!options.expanded && activeJob(job)) {
     const activity = output.split("\n").filter((line) => line.trim()).slice(-3).map((line) => theme.fg("dim", "› ") + theme.fg("muted", shortPaths(oneLine(line))));
-    return clipped([header, ...activity, theme.fg("dim", "ctrl+o to expand")]);
+    return clipped([header, ...activity, theme.fg("dim", ctx?.hint ?? "ctrl+o to expand")]);
   }
   body.addChild(clipped([header]));
   if (options.expanded) {
@@ -61,6 +61,20 @@ function renderResult(result: AgentToolResult<unknown>, options: ToolRenderResul
   body.addChild(new Markdown(options.expanded || job.status === "waiting" ? output : output.split("\n").slice(-6).join("\n"), 0, 0, getMarkdownTheme()));
   if (job.status === "waiting") body.addChild(new Text(theme.fg("warning", `Answer with agent action message, id ${job.name ?? job.id}.`), 0, 0));
   return body;
+}
+
+function renderCard(result: AgentToolResult<unknown>, options: ToolRenderResultOptions, theme: Theme, hint?: string) {
+  const job = (result.details as Partial<JobResult> | undefined)?.job;
+  const box = new Box(1, 1, job ? (text) => theme.bg(job.status === "done" ? "toolSuccessBg" : pendingJob(job) ? "toolPendingBg" : "toolErrorBg", text) : undefined);
+  box.addChild(renderResult(result, options, theme, { hint }));
+  if (hint && (!job || !activeJob(job))) box.addChild(clipped([theme.fg("dim", hint)]));
+  return box;
+}
+
+type JobProgress = AgentToolResult<Partial<JobResult>>;
+function jobProgress(current: AgentJobs, info: Partial<JobResult> & { job: Job }): JobProgress {
+  const output = (activeJob(info.job) ? current.preview(info.job.id) : "") || info.output || "Working";
+  return { content: [{ type: "text", text: output }], details: { ...info, output } };
 }
 
 export async function agentInstructions(config: AgentConfig, cwd: string, ctx: ExtensionContext, signal?: AbortSignal) {
@@ -92,6 +106,90 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
   let flushing = false;
   const pendingReports = new Set<string>();
   const reportedUsage = new Map<string, Usage>();
+  const foregroundWaits = new Map<string, number>();
+  const cardOwners = new Map<string, string>();
+  const cardResults = new Map<string, JobProgress>();
+  const toolJobs = new Map<string, string>();
+  const cardInvalidators = new Map<string, () => void>();
+  const recoveringCards = new Set<string>();
+  let commandJob: string | undefined;
+  const publish = (progress: JobProgress) => {
+    const id = progress.details.job?.id;
+    if (!id) return progress;
+    const saved = cardResults.get(id);
+    const merged = { ...progress, details: { ...saved?.details, ...progress.details } };
+    cardResults.set(id, merged);
+    cardInvalidators.get(id)?.();
+    return merged;
+  };
+  const rememberTool = (callId: string, progress: JobProgress) => {
+    const id = progress.details.job?.id;
+    if (!id) return;
+    toolJobs.set(callId, id);
+    if (!cardOwners.has(id)) cardOwners.set(id, callId);
+    publish(progress);
+  };
+  const messageCardId = (type: string, job: Job, timestamp: number) => `${type}:${job.id}:${job.requestId}:${timestamp}`;
+  const restoreCards = (ctx: ExtensionContext) => {
+    cardOwners.clear(); cardResults.clear(); toolJobs.clear(); cardInvalidators.clear();
+    for (const entry of ctx.sessionManager.buildContextEntries?.() ?? ctx.sessionManager.getBranch()) {
+      if (entry.type === "message" && entry.message.role === "toolResult") {
+        const info = entry.message.details as Partial<JobResult> | undefined;
+        if (info?.job) rememberTool(entry.message.toolCallId, { content: entry.message.content, details: info });
+      } else if (entry.type === "custom_message" && ["agent-progress", "agent-result", "agent-question"].includes(entry.customType)) {
+        const info = entry.details as Partial<JobResult> | undefined;
+        if (!info?.job) continue;
+        if (entry.display !== false && !cardOwners.has(info.job.id)) cardOwners.set(info.job.id, messageCardId(entry.customType, info.job, new Date(entry.timestamp).getTime()));
+        publish({ content: typeof entry.content === "string" ? [{ type: "text", text: entry.content }] : entry.content, details: info });
+      }
+    }
+    // A hidden report can outlive the original visible card after compaction.
+    // Restore a visible card without re-running the job or triggering a parent turn.
+    if (ctx.hasUI) for (const [id, progress] of cardResults) {
+      if (cardOwners.has(id)) { recoveringCards.delete(id); continue; }
+      if (recoveringCards.has(id)) continue;
+      recoveringCards.add(id);
+      pi.sendMessage({ customType: "agent-progress", content: `Recovered ${progress.details.job?.name ?? id}`, details: progress.details, display: true }, { triggerTurn: false });
+    }
+  };
+  const liveCard = (progress: JobProgress, source: string, options: ToolRenderResultOptions, theme: Theme, ctx?: RenderContext) => {
+    const id = progress.details.job!.id;
+    if (!cardResults.has(id)) publish(progress);
+    if (!cardOwners.has(id)) cardOwners.set(id, source);
+    recoveringCards.delete(id);
+    if (cardOwners.get(id) === source && ctx?.invalidate) cardInvalidators.set(id, ctx.invalidate);
+    return {
+      invalidate() {},
+      render(width: number) {
+        if (cardOwners.get(id) !== source) return [];
+        return renderCard(cardResults.get(id) ?? progress, options, theme, commandJob === id ? "esc cancel" : undefined).render(width);
+      },
+    };
+  };
+  const renderToolCall = (agent: string, args: Parameters<typeof renderCall>[1], theme: Theme, ctx?: RenderContext) => {
+    return {
+      invalidate() {},
+      render(width: number) {
+        if (ctx?.toolCallId && toolJobs.has(ctx.toolCallId)) return [];
+        if (args.id && args.action && !["run", "list"].includes(args.action)) {
+          const job = [...cardResults.values()].find((result) => result.details.job?.id === args.id || result.details.job?.name === args.id)?.details.job;
+          if (job && cardOwners.has(job.id)) return [];
+        }
+        const box = new Box(1, 1, (text) => theme.bg("toolPendingBg", text));
+        box.addChild(renderCall(agent, args, theme, ctx));
+        return box.render(width);
+      },
+    };
+  };
+  const renderToolResult = (result: AgentToolResult<unknown>, options: ToolRenderResultOptions, theme: Theme, ctx?: RenderContext) => {
+    const known = ctx?.toolCallId ? cardResults.get(toolJobs.get(ctx.toolCallId) ?? "") : undefined;
+    const info = (result.details as Partial<JobResult> | undefined)?.job ? result.details as Partial<JobResult> : known?.details;
+    if (!info?.job || !ctx?.toolCallId) return renderResult(result, options, theme, ctx);
+    toolJobs.set(ctx.toolCallId, info.job.id);
+    // Pi replaces aborted tool updates with a detail-less error. The background
+    // job may still be running, so keep its original live card attached.
+    return liveCard({ content: result.content, details: info }, ctx.toolCallId, options, theme, ctx);
+  };
   const collectUsage = (result: JobResult, ctx: ExtensionContext): Usage | undefined => {
     const id = result.job.id;
     // Session totals include all entries, even compacted or abandoned branches.
@@ -121,6 +219,25 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
     if (flushing) return;
     flushing = true;
     try {
+      if (ctx.hasUI) {
+        const refresh = entries.filter((job) => activeJob(job) || !job.delivered || (cardOwners.has(job.id) &&
+          (cardResults.get(job.id)?.details.job?.requestId !== job.requestId || cardResults.get(job.id)?.details.job?.status !== job.status)));
+        const progress = await Promise.all(refresh.map(async (job) => jobProgress(current, await current.result(job.id))));
+        if (current !== jobs) return;
+        for (const result of progress) publish(result);
+        const background = progress.filter((result) => {
+          const job = result.details.job!;
+          return job.background && activeJob(job) && !cardOwners.has(job.id) && !foregroundWaits.has(job.id);
+        });
+        ctx.ui.setWidget("subagents-monitor", background.length ? (_tui, theme) => {
+          const cards = new Container();
+          for (const result of background) {
+            const job = result.details.job!;
+            cards.addChild(renderCard(result, { expanded: false, isPartial: true }, theme, `/agents ${job.name ?? job.id} to inspect or cancel`));
+          }
+          return cards;
+        } : undefined);
+      }
       for (const job of entries.filter((job) => !activeJob(job) && !job.delivered)) {
         const customType = job.status === "waiting" ? "agent-question" : "agent-result";
         const persisted = () => ctx.sessionManager.getBranch().some((entry: any) =>
@@ -130,7 +247,11 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
           const result = await current.result(job.id);
           if (current !== jobs) return;
           if (result.job.requestId !== job.requestId || activeJob(result.job)) continue;
-          pi.sendMessage({ customType, content: formatResult(result), details: result, display: true }, { deliverAs: "followUp", triggerTurn: true });
+          // A cancelled job needs no acknowledgement turn, especially after the
+          // user just interrupted the parent. Timeouts still need parent attention.
+          const userCancelled = result.job.status === "cancelled" && (!result.job.error || result.job.error === "Cancelled");
+          pi.sendMessage({ customType, content: formatResult(result), details: result, display: !cardOwners.has(job.id) },
+            { deliverAs: "followUp", triggerTurn: !userCancelled });
           pendingReports.add(job.requestId);
         }
         // Queued parent messages are not durable yet. A restart must be able to deliver them again.
@@ -150,7 +271,9 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
   pi.on("session_start", async (_event, ctx) => {
     if (!pi.getActiveTools().some((name) => ["agent", "scout", "review", "commit"].includes(name))) return;
     reportedUsage.clear();
+    recoveringCards.clear();
     context = ctx;
+    restoreCards(ctx);
     setSubagentPreset(undefined);
     const saved = ctx.sessionManager.getBranch().findLast((entry: any) => entry.type === "custom" && entry.customType === "agent-preset") as { data?: { name?: string } } | undefined;
     if (saved?.data?.name) setSubagentPreset(saved.data.name);
@@ -173,6 +296,12 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
     scheduleUpdate();
   });
   pi.on("message_end", scheduleUpdate);
+  const refreshCards = (_event: unknown, ctx: ExtensionContext) => {
+    restoreCards(ctx);
+    scheduleUpdate();
+  };
+  pi.on("session_tree", refreshCards);
+  pi.on("session_compact", refreshCards);
   pi.on("session_shutdown", async (_event, ctx) => {
     unsubscribe?.(); unsubscribe = undefined;
     unsubscribeInterrupt?.(); unsubscribeInterrupt = undefined;
@@ -181,39 +310,64 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
     const closing = jobs; jobs = undefined; context = undefined;
     pendingReports.clear();
     reportedUsage.clear();
+    foregroundWaits.clear();
+    cardOwners.clear(); cardResults.clear(); toolJobs.clear(); cardInvalidators.clear(); commandJob = undefined;
+    recoveringCards.clear();
     ctx.ui.setStatus("subagents", undefined);
     ctx.ui.setWidget("subagents-monitor", undefined);
+    ctx.ui.setWidget("commit", undefined);
     await closing?.close();
   });
 
-  const run = async (agent: string, task: string, ctx: ExtensionContext, route?: string, background = false, signal?: AbortSignal, onUpdate?: (result: any) => void, cwd = ctx.cwd, options?: { name?: string; title?: string }) => {
-    const current = getJobs();
-    const config = resolveAgent(agent, route);
-    const slash = config.model.indexOf("/");
-    if (!ctx.modelRegistry.find(config.model.slice(0, slash), config.model.slice(slash + 1))) throw new Error(`Unknown model "${config.model}"`);
-    const instructions = await agentInstructions(config, cwd, ctx, signal);
-    const job = await current.spawn(agent, { ...config, instructions }, task, cwd, background, signal, options);
-    if (background) return { content: [{ type: "text" as const, text: `Started ${agent} job ${job.name ?? job.id} (${job.id}). Results and questions arrive automatically. Use agent action wait, status, message, or cancel with its name or id.` }], details: { job } };
+  const waitWithProgress = async (current: AgentJobs, initial: Partial<JobResult> & { job: Job }, signal?: AbortSignal, onUpdate?: (result: JobProgress) => void) => {
+    const { job } = initial;
+    if (onUpdate) {
+      foregroundWaits.set(job.id, (foregroundWaits.get(job.id) ?? 0) + 1);
+      scheduleUpdate();
+    }
     let stopped = false, feedbackTimer: ReturnType<typeof setTimeout> | undefined;
     const emit = () => {
       if (stopped || feedbackTimer || !onUpdate) return;
       feedbackTimer = setTimeout(() => {
         feedbackTimer = undefined;
         void current.result(job.id).then((info) => {
-          if (!stopped) onUpdate({ content: [{ type: "text", text: current.preview(job.id) || info.output }], details: info });
+          if (!stopped) onUpdate(publish(jobProgress(current, info)));
         }).catch(() => {});
       }, 100);
     };
     const stop = current.subscribe(emit);
-    onUpdate?.({ content: [{ type: "text", text: current.preview(job.id) || "Working" }], details: { job } });
     try {
+      const progress = publish(jobProgress(current, initial));
+      onUpdate?.(progress);
       const result = await current.wait(job.id, signal);
-      return { content: [{ type: "text" as const, text: formatResult(result) }], details: result, usage: result.usage, isError: result.job.status === "failed" || result.job.status === "cancelled" };
-    } finally { stopped = true; stop(); if (feedbackTimer) clearTimeout(feedbackTimer); }
+      publish({ content: [{ type: "text", text: result.output }], details: result });
+      return result;
+    } finally {
+      stopped = true; stop(); if (feedbackTimer) clearTimeout(feedbackTimer);
+      if (onUpdate) {
+        const remaining = (foregroundWaits.get(job.id) ?? 1) - 1;
+        if (remaining) foregroundWaits.set(job.id, remaining); else foregroundWaits.delete(job.id);
+        scheduleUpdate();
+      }
+    }
+  };
+
+  const run = async (agent: string, task: string, ctx: ExtensionContext, route?: string, background = false, signal?: AbortSignal, onUpdate?: (result: JobProgress) => void, cwd = ctx.cwd, options?: { name?: string; title?: string }) => {
+    const current = getJobs();
+    const config = resolveAgent(agent, route);
+    const slash = config.model.indexOf("/");
+    if (!ctx.modelRegistry.find(config.model.slice(0, slash), config.model.slice(slash + 1))) throw new Error(`Unknown model "${config.model}"`);
+    const instructions = await agentInstructions(config, cwd, ctx, signal);
+    const job = await current.spawn(agent, { ...config, instructions }, task, cwd, background, signal, options);
+    publish(jobProgress(current, { job }));
+    if (background) return { content: [{ type: "text" as const, text: `Started ${agent} job ${job.name ?? job.id} (${job.id}). Results and questions arrive automatically. Use agent action wait, status, message, or cancel with its name or id.` }], details: { job } };
+    const result = await waitWithProgress(current, { job }, signal, onUpdate);
+    return { content: [{ type: "text" as const, text: formatResult(result) }], details: result, usage: result.usage, isError: result.job.status === "failed" || result.job.status === "cancelled" };
   };
 
   pi.registerTool({
     name: "agent", label: "Agent", exposure: "model-only",
+    renderShell: "self",
     description: "Run a named subagent or manage its durable background job. Omit agent to use default for implementation and useful handoffs without a specialist. Results of background jobs arrive automatically, including after a restart.",
     promptSnippet: "Delegate a self-contained task; default handles work without a specialist",
     promptGuidelines: [
@@ -237,6 +391,7 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
       const action = args.action ?? "run";
       if (action === "run") {
         const result = await run(args.agent ?? "default", args.task ?? "", ctx, args.route, args.background, signal, onUpdate, args.working_dir ? resolve(ctx.cwd, args.working_dir) : ctx.cwd, { name: args.name, title: args.title });
+        rememberTool(_call, jobProgress(getJobs(), result.details));
         return args.background ? result : { ...result, usage: collectUsage(result.details as JobResult, ctx) };
       }
       const current = getJobs();
@@ -248,32 +403,36 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
       if (!args.id) throw new Error(`${action} requires id`);
       if (action === "message") {
         const job = await current.message(args.id, args.task ?? "");
+        rememberTool(_call, jobProgress(current, { job }));
         return { content: [{ type: "text", text: `Message sent to ${job.id}` }], details: { job } };
       }
       if (action === "cancel") await current.cancel(args.id);
-      const result = action === "wait" ? await current.wait(args.id, signal) : await current.result(args.id);
+      const initial = await current.result(args.id);
+      const result = action === "wait" ? await waitWithProgress(current, initial, signal, onUpdate) : initial;
+      rememberTool(_call, { content: [{ type: "text", text: result.output }], details: result });
       return { content: [{ type: "text", text: formatResult(result) }], details: result, usage: action === "wait" ? collectUsage(result, ctx) : undefined, isError: result.job.status === "failed" };
     },
-    renderCall: (args, theme, ctx) => renderCall(args.agent ?? "default", args, theme, ctx),
-    renderResult,
+    renderCall: (args, theme, ctx) => renderToolCall(args.agent ?? "default", args, theme, ctx),
+    renderResult: renderToolResult,
   });
   for (const [name, shortcut] of Object.entries(SHORTCUTS)) pi.registerTool({
     name, label: name, exposure: "model-only", description: shortcut.description,
+    renderShell: "self",
     promptGuidelines: [...shortcut.guidelines, "An explicit user model pick goes in route and overrides this agent's model."],
     parameters: Type.Object({ task: Type.String(), route: Type.Optional(Type.String({ description: "Agent name or provider/model[:thinking]" })) }),
     execute: async (_call, args, signal, onUpdate, ctx) => {
       const result = await run(shortcut.agent, args.task, ctx, args.route, false, signal, onUpdate);
+      rememberTool(_call, jobProgress(getJobs(), result.details));
       return { ...result, usage: collectUsage(result.details as JobResult, ctx) };
     },
-    renderCall: (args, theme, ctx) => renderCall(shortcut.agent, args, theme, ctx),
-    renderResult,
+    renderCall: (args, theme, ctx) => renderToolCall(shortcut.agent, args, theme, ctx),
+    renderResult: renderToolResult,
   });
-  for (const name of ["agent-result", "agent-question"]) pi.registerMessageRenderer<JobResult>(name, (message, options, theme) => {
-    const result = message.details;
-    const box = new Box(1, 1, result ? (text) => theme.bg(result.job.status === "done" ? "toolSuccessBg" : pendingJob(result.job) ? "toolPendingBg" : "toolErrorBg", text) : undefined);
+  for (const name of ["agent-progress", "agent-result", "agent-question"]) pi.registerMessageRenderer<Partial<JobResult>>(name, (message, options, theme) => {
     const content = typeof message.content === "string" ? message.content : message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
-    box.addChild(renderResult({ content: [{ type: "text", text: content }], details: result }, { expanded: options?.expanded ?? true, isPartial: false }, theme));
-    return box;
+    const result = { content: [{ type: "text" as const, text: content }], details: message.details ?? {} };
+    if (message.details?.job) return liveCard(result, messageCardId(name, message.details.job, message.timestamp), { expanded: options?.expanded ?? false, isPartial: false }, theme);
+    return renderCard(result, { expanded: options?.expanded ?? false, isPartial: false }, theme);
   });
 
   const configureAgents = async (ctx: ExtensionContext) => {
@@ -338,43 +497,41 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
     handler: async (args, ctx) => {
       if (!ctx.isIdle()) { ctx.ui.notify("Agent is busy", "warning"); return; }
       const task = args.trim() || "Analyze completed work and create the appropriate commits.";
-      const startedAt = Date.now();
-      let progress: { content: { text: string }[]; details: { job: Job } } | undefined;
-      const showProgress = () => ctx.ui.setWidget("commit", (_tui, theme) => {
-        const box = new Box(1, 1, (text) => theme.bg("toolPendingBg", text));
-        box.addChild({
-          invalidate() {},
-          render(width) {
-            return [
-              theme.fg("toolTitle", theme.bold(`Commit · ${elapsed(startedAt)} · ${progress ? `${progress.details.job.model}:${progress.details.job.thinking}` : "Preparing agent"}`)),
-              theme.fg("dim", terminalText(task).replace(/\s+/g, " ")),
-              ...(progress ? terminalText(progress.content[0].text).split("\n").slice(-6) : ["Loading instructions and skills…"]).map((line) => theme.fg("toolOutput", line)),
-              theme.fg("dim", "esc cancel"),
-            ].map((line) => truncateToWidth(line, width));
-          },
-        });
-        return box;
-      });
+      let progress: JobProgress = { content: [{ type: "text", text: `Preparing commit agent\n${task}\nLoading instructions and skills…` }], details: {} };
+      const showProgress = () => ctx.ui.setWidget("commit", (_tui, theme) => renderCard(progress, { expanded: false, isPartial: true }, theme, "esc cancel"));
       showProgress();
-      const timer = setInterval(showProgress, 1000);
       const controller = new AbortController();
       const stop = ctx.ui.onTerminalInput?.((data) => {
         if (matchesKey(data, Key.escape)) { controller.abort(); return { consume: true }; }
       });
       try {
         const result = await run("commit", task, ctx, undefined, false, controller.signal,
-          (update) => { progress = update; showProgress(); });
-        pi.sendMessage({ customType: result.details.job.status === "waiting" ? "agent-question" : "agent-result", content: result.content, details: result.details, display: true });
+          (update) => {
+            progress = update;
+            if (!commandJob && update.details.job) {
+              commandJob = update.details.job.id;
+              pi.sendMessage({ customType: "agent-progress", content: `Started ${update.details.job.name ?? "commit"}`, details: update.details, display: true }, { triggerTurn: false });
+              ctx.ui.setWidget("commit", undefined);
+            }
+          });
+        const waiting = result.details.job.status === "waiting";
+        pi.sendMessage({ customType: waiting ? "agent-question" : "agent-result", content: result.content, details: result.details, display: !cardOwners.has(result.details.job.id) },
+          { deliverAs: "followUp", triggerTurn: waiting });
       } catch (error) {
         const text = controller.signal.aborted ? "Commit agent cancelled" : `Commit agent failed: ${String(error)}`;
         let result: JobResult | undefined;
-        if (progress?.details.job.id && jobs) {
+        if (progress.details.job?.id && jobs) {
           try { if (controller.signal.aborted) await jobs.cancel(progress.details.job.id); result = await jobs.result(progress.details.job.id); } catch { /* Setup may have failed before a job was stored. */ }
         }
-        pi.sendMessage({ customType: "agent-result", content: result ? formatResult(result) : `${text}\n\nTask: ${task}`, details: result, display: true });
+        pi.sendMessage({ customType: "agent-result", content: result ? formatResult(result) : `${text}\n\nTask: ${task}`, details: result, display: !result || !cardOwners.has(result.job.id) });
         ctx.ui.notify(text, controller.signal.aborted ? "info" : "error");
       }
-      finally { clearInterval(timer); stop?.(); ctx.ui.setWidget("commit", undefined); }
+      finally {
+        stop?.(); ctx.ui.setWidget("commit", undefined);
+        if (commandJob) cardInvalidators.get(commandJob)?.();
+        commandJob = undefined;
+        scheduleUpdate();
+      }
     },
   });
 }
