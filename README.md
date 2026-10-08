@@ -60,7 +60,9 @@ Presets are optional model/thinking overrides keyed directly by agent name. Ther
 }
 ```
 
-Switch with `/agents preset budget` or `/subagent-preset budget`. The selection is saved in the parent session. `PI_SUBAGENT_PRESET` sets the machine default; a session selection takes priority. Built-in presets are `personal`, `openai`, `opencode-go`, and `copilot`. The `copilot` preset permits only GitHub Copilot models, including explicit overrides and custom agents.
+Switch with `/agents preset budget` or `/subagent-preset budget`. The selection is saved in the parent session. `PI_SUBAGENT_PRESET` sets the machine default; a session selection takes priority. Built-in presets are `personal`, `openai`, `opencode-go`, `copilot`, and `anthropic-work`. The `copilot` preset permits only GitHub Copilot models; `anthropic-work` permits only direct Anthropic models. These restrictions cover explicit overrides, custom agents, and saved model choices.
+
+`anthropic-work` uses Haiku 5.5 with low thinking for exploration and commits, Sonnet 5.5 with medium thinking for implementation and low thinking for worktree setup, and Opus 5.5 with high thinking for review and planning. Activate it with `/agents preset anthropic-work`. It changes child models only, not the parent session's model.
 
 ### Run and manage jobs
 

@@ -55,6 +55,17 @@ function mergedConfig(): Config {
 export function getActiveSubagentPresetName() {
   return sessionPreset ?? (process.env.PI_SUBAGENT_PRESET?.trim() || undefined) ?? mergedConfig().preset;
 }
+export function getSubagentProviderRestriction(): string | undefined {
+  const preset = getActiveSubagentPresetName();
+  if (preset === "copilot") return "github-copilot";
+  if (preset === "anthropic-work") return "anthropic";
+}
+function assertSubagentProvider(model: string) {
+  const provider = getSubagentProviderRestriction();
+  if (provider && !model.startsWith(`${provider}/`)) {
+    throw new Error(`The ${getActiveSubagentPresetName()} preset only permits ${provider} models.`);
+  }
+}
 export function getSubagentPresetNames() { return Object.keys(mergedConfig().presets ?? {}); }
 export function setSubagentPreset(name: string | undefined) {
   if (name !== undefined && !getSubagentPresetNames().includes(name)) throw new Error(`Unknown agent preset "${name}"`);
@@ -82,7 +93,7 @@ export function getAgents(): Record<string, AgentConfig> {
       throw new Error(`Invalid configuration for agent "${name}" in ${configPath()}`);
     }
     agents[name] = agent;
-    if (preset === "copilot" && !agent.model.startsWith("github-copilot/")) throw new Error(`The copilot preset only permits github-copilot models; check agent "${name}".`);
+    assertSubagentProvider(agent.model);
   }
   return agents;
 }
@@ -97,14 +108,14 @@ export function resolveAgent(name = "default", route?: string): AgentConfig {
   const match = /^([^/\s]+\/\S+?)(?::(off|minimal|low|medium|high|xhigh|max))?$/.exec(route);
   if (!match) throw new Error(`Unknown agent or model "${route}". Use an agent name or provider/model[:thinking].`);
   // A workplace preset must never silently send code to another provider.
-  if (getActiveSubagentPresetName() === "copilot" && !match[1].startsWith("github-copilot/")) throw new Error("The copilot preset only permits github-copilot models.");
+  assertSubagentProvider(match[1]);
   return { ...agents[name], model: match[1], thinking: (match[2] as AgentConfig["thinking"]) ?? agents[name].thinking };
 }
 
 export function saveAgentModel(name: string, model: string, thinking: AgentConfig["thinking"]) {
   resolveAgent(name);
   if (!/^[^/\s]+\/\S+$/.test(model) || !THINKING_LEVELS.includes(thinking)) throw new Error("Invalid model or thinking level");
-  if (getActiveSubagentPresetName() === "copilot" && !model.startsWith("github-copilot/")) throw new Error("The copilot preset only permits github-copilot models.");
+  assertSubagentProvider(model);
   const local = readConfig(configPath());
   const preset = getActiveSubagentPresetName();
   if (preset) {

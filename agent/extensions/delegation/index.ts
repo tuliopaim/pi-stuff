@@ -7,7 +7,7 @@ import type { Usage } from "@earendil-works/pi-ai";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai/models";
 import { MemoryStorage } from "@earendil-works/pi-durable";
 import { createChildResources, resolveStandaloneChildProjectTrust } from "../shared/child-session.ts";
-import { configPath, getActiveSubagentPresetName, getAgents, getSubagentPresetNames, resolveAgent, saveAgentModel, setSubagentPreset, THINKING_LEVELS, type AgentConfig } from "./config.ts";
+import { configPath, getActiveSubagentPresetName, getAgents, getSubagentPresetNames, getSubagentProviderRestriction, resolveAgent, saveAgentModel, setSubagentPreset, THINKING_LEVELS, type AgentConfig } from "./config.ts";
 import { AgentJobs, modelsFromRegistry, type Job, type JobResult } from "./durable.ts";
 import { registerDynamicRouteGuidance } from "./runtime.ts";
 import { showAgents } from "./dashboard.ts";
@@ -440,8 +440,9 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
     const name = await ctx.ui.select("Configure agent", Object.entries(agents).map(([name, agent]) => `${name} · ${agent.model}:${agent.thinking}`));
     if (!name) return;
     const agent = name.split(" · ")[0];
+    const provider = getSubagentProviderRestriction();
     const available = ctx.modelRegistry.getAvailable().map((model) => `${model.provider}/${model.id}`)
-      .filter((model) => getActiveSubagentPresetName() !== "copilot" || model.startsWith("github-copilot/"));
+      .filter((model) => !provider || model.startsWith(`${provider}/`));
     const model = await ctx.ui.select(`Model for ${agent}`, available);
     if (!model) return;
     const slash = model.indexOf("/");

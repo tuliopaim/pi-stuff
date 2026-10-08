@@ -50,6 +50,14 @@
   "preset": "personal",
   "presets": {
     "personal": {},
+    "anthropic-work": {
+      "explore": { "model": "anthropic/claude-haiku-5-5", "thinking": "low" },
+      "review": { "model": "anthropic/claude-opus-5-5", "thinking": "high" },
+      "plan": { "model": "anthropic/claude-opus-5-5", "thinking": "high" },
+      "default": { "model": "anthropic/claude-sonnet-5-5", "thinking": "medium" },
+      "commit": { "model": "anthropic/claude-haiku-5-5", "thinking": "low" },
+      "setup-wt": { "model": "anthropic/claude-sonnet-5-5", "thinking": "low" }
+    },
     "openai": {
       "explore": { "model": "openai-codex/gpt-6-luna", "thinking": "low" },
       "default": { "model": "openai-codex/gpt-6.1-sol", "thinking": "medium" },

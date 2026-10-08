@@ -296,6 +296,26 @@ test("configuration picker saves the selected model and thinking without a reloa
   assert.equal(getAgents().explore.thinking, "low");
 });
 
+for (const [preset, provider] of [["copilot", "github-copilot"], ["anthropic-work", "anthropic"]]) {
+  test(`${preset} configuration picker only offers its permitted provider`, async (t) => {
+    const { commands } = harness(t);
+    setSubagentPreset(preset);
+    const ctx = { hasUI: true,
+      modelRegistry: { getAvailable: () => [
+        { provider, id: "allowed" },
+        { provider: "openai", id: "blocked" },
+        { provider: `${provider}-proxy`, id: "blocked" },
+      ] },
+      ui: { select: async (title: string, options: string[]) => {
+        if (title === "Configure agent") return options[0];
+        assert.deepEqual(options, [`${provider}/allowed`]);
+        return undefined;
+      } },
+    };
+    await commands.get("agents").handler("configure", ctx);
+  });
+}
+
 test("queued background reports are acknowledged only after the parent stores them", async (t) => {
   const job = { id: "job", requestId: "queued", agent: "default", status: "done", background: true, delivered: false, model: "provider/model", thinking: "low", task: "task" };
   let acknowledged = 0;

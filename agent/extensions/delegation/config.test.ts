@@ -109,6 +109,49 @@ test("native model configuration persists in the active preset without replacing
   assert.deepEqual(saved.presets.personal.explore, { model: "custom/new", thinking: "low" });
 });
 
+test("anthropic-work uses the agreed model split and keeps specialist tools", (t) => {
+  setup(t);
+  const base = getAgents();
+  setSubagentPreset("anthropic-work");
+  const expected = {
+    explore: ["claude-haiku-5-5", "low"],
+    review: ["claude-opus-5-5", "high"],
+    plan: ["claude-opus-5-5", "high"],
+    default: ["claude-sonnet-5-5", "medium"],
+    "setup-wt": ["claude-sonnet-5-5", "low"],
+    commit: ["claude-haiku-5-5", "low"],
+  };
+  for (const [name, [model, thinking]] of Object.entries(expected)) {
+    const agent = resolveAgent(name);
+    assert.equal(agent.model, `anthropic/${model}`);
+    assert.equal(agent.thinking, thinking);
+    assert.deepEqual(agent.tools, base[name].tools);
+    assert.equal(agent.instructions, base[name].instructions);
+    assert.equal(validateRoute(agent.model, agent.thinking).allowed, true);
+  }
+  const override = resolveAgent("default", "anthropic/claude-opus-5-5:high");
+  assert.equal(override.model, "anthropic/claude-opus-5-5");
+  assert.deepEqual(override.tools, base.default.tools);
+  assert.equal(resolveAgent("default", "review").model, override.model);
+});
+
+for (const [preset, provider] of [["copilot", "github-copilot"], ["anthropic-work", "anthropic"]]) {
+  test(`${preset} rejects other providers in routes, saved models, and custom agents`, (t) => {
+    const directory = setup(t);
+    setSubagentPreset(preset);
+    for (const model of ["openai/model", `${provider}-proxy/model`]) {
+      assert.throws(() => resolveAgent("default", model), /only permits/);
+      assert.throws(() => saveAgentModel("default", model, "medium"), /only permits/);
+      assert.equal(validateRoute(model, "medium").allowed, false);
+    }
+    saveAgentModel("default", `${provider}/custom`, "medium");
+    assert.equal(resolveAgent().model, `${provider}/custom`);
+    writeFileSync(join(directory, "agents.json"), JSON.stringify({ agents: { custom: { model: "openai/model" } } }));
+    assert.throws(getAgents, /only permits/);
+    assert.throws(() => resolveAgent("default", "custom"), /only permits/);
+  });
+}
+
 test("malformed configuration and unknown presets fail closed", (t) => {
   const directory = setup(t);
   const file = join(directory, "agents.json");
