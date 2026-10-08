@@ -18,7 +18,8 @@
       "source": "npm:@plannotator/pi-extension",
       "skills": []
     },
-    "git:github.com/DietrichGebert/ponytail"
+    "git:github.com/DietrichGebert/ponytail",
+    "npm:pi-optmem@1.0.0"
   ],
   "extensions": [
     "~/dotfiles/pi/agent/extensions"
