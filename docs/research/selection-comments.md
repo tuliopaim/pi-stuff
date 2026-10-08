@@ -11,19 +11,28 @@ pi -e /Users/tuliopaim/dotfiles/pi-selection-comments/agent/extensions/selection
 ```
 
 1. Use fullscreen mode, selectable through `/settings`.
-2. Drag-select some transcript text. A small Cite button appears beside the end of the selection.
-3. Click Cite and type a comment.
-4. Click Send, or press Enter or Ctrl+Enter. Shift+Enter inserts a newline. Escape cancels.
+2. Drag-select some transcript text, then click Comment, right-click the selection, or press F6.
+3. Type a comment. Click Save, or press Enter or Ctrl+S, to save it without sending. The card closes and the list stays hidden.
+4. Select another passage and add a note. The card shows your saved notes below the new comment.
+5. Click Send all or press Ctrl+Enter to send one message containing the saved notes and any current comment. The next card starts with an empty list.
 
-`/cite` or Alt+Shift+C opens the comment popup for the last captured selection. Copy-on-select continues to work. Nothing reaches the agent until you send. Messages go to the same Pi session and wait as follow-ups if the agent is busy.
+Shift+Enter inserts a newline. Escape or Cancel discards only the current draft, not saved notes. Click × beside a saved note to delete it. Tab switches between editing and the list; use Up/Down and Delete or Backspace to remove a selected note. Long lists scroll with the mouse wheel.
 
-The comment card has a single rounded border, a neutral background, and a quote preview limited to two rows. The preview may shorten long passages; sending always includes the full quote. Send stays dim until the comment contains text. The card opens below the selection when there is room, otherwise above it.
+Outside the card, a quiet row above the main editor shows the saved count, Review, and Send all. Both actions are clickable. F7 or `/notes` opens the list; F8 or `/notes send` sends the saved batch. `/cite` adds another note using the last captured selection.
 
-This is a terminal popup, not a native macOS popover. It works with Pi-owned mouse selection, not selection performed by the outer terminal or Herdr's scrollback. Comments are not saved across session shutdown. There is no comment batching.
+On a Mac, use Fn/Globe with F6, F7, or F8 if those keys normally control system functions. The extension does not bind Option/Alt shortcuts.
+
+Copy-on-select continues to work. Nothing reaches the agent until you explicitly send. Messages go to the same Pi session and wait as follow-ups if the agent is busy.
+
+The card keeps its single rounded border and neutral background. The current quote takes at most two rows. Saved notes show short quote/comment previews, at most three notes at a time, with a delete control on each. Short windows use compact previews to keep the buttons visible. Sending always includes full quotes and comments, oldest first. Send stays dim when both the list and draft are empty.
+
+Saved notes use custom Pi session entries, excluded from model context, so they survive reload and resume and follow the active session branch. Pi's public send API has no delivery acknowledgement. The list clears when the message is handed to Pi; if Pi later rejects delivery, `/notes recover` restores the last submitted batch for review. Check the transcript before resending to avoid duplicates.
+
+This is a terminal popup, not a native macOS popover. It works with Pi-owned mouse selection, not selection performed by the outer terminal or Herdr's scrollback.
 
 ## Pi compatibility
 
-Research and the initial in-memory check used installed Pi 1.0.4. Fullscreen Pi already supports mouse selection, clickable components, and overlays positioned in terminal rows and columns. Its default `fullscreenCopyOnSelect` is `true`.
+Research and the initial in-memory check used installed Pi 1.0.4. Batch work also checks the currently installed Pi 1.1.0. Fullscreen Pi already supports mouse selection, clickable components, and overlays positioned in terminal rows and columns. Its default `fullscreenCopyOnSelect` is `true`.
 
 Sources:
 
@@ -41,13 +50,15 @@ A supported version should replace the adapter with a public selection-completed
 
 ## Validation
 
-The prototype tests cover exact quote capture, a second selection before repaint, mouse Send/Cancel and editor cursor placement, Enter and Ctrl+Enter, multiline comments, expanded pastes, narrow widths, card borders and backgrounds, safe disposal, unsupported hosts, and preserving comments if delivery fails.
+The prototype tests cover exact quote capture, right-click capture, repeated selections, mouse Save/Send/Cancel/Delete, keyboard save and batch send, bounded list scrolling, editor cursor placement, multiline comments, expanded pastes, narrow widths, card borders and backgrounds, safe disposal, unsupported hosts, branch restoration, reload, recovery, and storage/delivery failures.
 
 ```sh
 npm test --prefix /Users/tuliopaim/dotfiles/pi-selection-comments/agent
 ```
 
-Strict TypeScript checking passed for the extension. A separate in-memory smoke test used the installed Pi 1.0.4 extension loader and its real forwarding TUI proxy. It exercised mouse selection, Cite, comment submission, regular/fullscreen renderer replacement, and cleanup. No real agent request or clipboard change was made. The user confirmed the initial prototype works in Herdr; the revised card still needs a live visual check.
+Strict TypeScript checking passed for the extension and tests. The single-comment version also passed an in-memory smoke test using Pi 1.0.4's real loader and forwarding TUI proxy, including dark/light themes. The user confirmed that version works well in Herdr.
+
+The batch version passed the same kind of smoke test with installed Pi 1.1.0 and its real dark/light themes: right-click capture, shortcut registration, Save, review, Delete, batch send, recovery, renderer replacement, and cleanup. Checks at 8, 10, and 24 terminal rows also verified visible buttons and rejection of dialog results resolved before a branch change. No real agent request or clipboard access was made. The batch version still needs a live mouse check.
 
 ## Herdr findings
 
@@ -62,5 +73,7 @@ Herdr plugins support selected-text handoff, terminal popups, and explicit agent
 Evidence: [pane schema](https://github.com/herdrdev/herdr/blob/v0.9.3/src/api/schema/panes.rs), [event schema](https://github.com/herdrdev/herdr/blob/v0.9.3/src/api/schema/events.rs), and [plugin schema](https://github.com/herdrdev/herdr/blob/v0.9.3/src/api/schema/plugins.rs).
 
 Plannotator's upstream [Herdr Annotate plugin](https://github.com/plannotator/herdr-annotate/tree/e3ca7e88ada0c77baf5714c006a5abe36798349c) provides capture, a separate terminal comment editor, and explicit paste/send actions. It does not add a nearby Cite button when selecting text in the original pane. The read-only plugin listing for the inspected session returned no registered plugins, even though the dotfiles contain Annotate bindings.
+
+The batch workflow follows [Herdr Annotate's current usage](https://github.com/plannotator/herdr-annotate#annotate-terminal-text): Ctrl+S saves, sending is separate, a manager lists/removes notes, and numbered annotations reach the agent oldest first. Pi's version stays inside the existing card and adds no Herdr plugin or dependency.
 
 No installed Pi files, Herdr configuration, or running sessions were changed during research or implementation.
