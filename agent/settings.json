@@ -28,6 +28,9 @@
     "~/dotfiles/pi/agent/prompts"
   ],
   "treeFilterMode": "no-tools",
-  "theme": "dark",
+  "themes": [
+    "~/dotfiles/pi/agent/themes"
+  ],
+  "theme": "github-dark-default",
   "showCacheMissNotices": true
 }
