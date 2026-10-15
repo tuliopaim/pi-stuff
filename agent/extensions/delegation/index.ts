@@ -214,7 +214,7 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
     if (current !== jobs) return;
     if (ctx.hasUI) {
       const theme = ctx.ui.theme;
-      ctx.ui.setStatus("subagents", entries.some(pendingJob) ? `${theme.fg("muted", "subagents:")} ${statusCounts(entries.filter(pendingJob), theme)} ${theme.fg("dim", "/agents")}` : undefined);
+      ctx.ui.setStatus("subagents", entries.some(pendingJob) ? `${theme.fg("muted", "agents:")} ${statusCounts(entries.filter(pendingJob), theme)} ${theme.fg("dim", "/agents")}` : undefined);
     }
     if (flushing) return;
     flushing = true;
