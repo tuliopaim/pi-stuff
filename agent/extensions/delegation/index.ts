@@ -1,7 +1,7 @@
 import { join, resolve } from "node:path";
 import { awaitWithContext, BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import { formatSkillsForPrompt, getAgentDir, getMarkdownTheme, type AgentToolResult, type ExtensionAPI, type ExtensionContext, type ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
-import { Box, Container, Key, Markdown, matchesKey, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { Container, Key, Markdown, matchesKey, Text, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { Usage } from "@earendil-works/pi-ai";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai/models";
@@ -11,7 +11,7 @@ import { configPath, getActiveSubagentPresetName, getAgents, getSubagentPresetNa
 import { AgentJobs, modelsFromRegistry, type Job, type JobResult } from "./durable.ts";
 import { registerDynamicRouteGuidance } from "./runtime.ts";
 import { showAgents } from "./dashboard.ts";
-import { activeJob, jobColor, jobSummary, pendingJob, shortPaths, statusCounts, terminalText } from "./presentation.ts";
+import { activeJob, elapsed, jobColor, jobSummary, pendingJob, shortPaths, statusCounts, terminalText } from "./presentation.ts";
 
 const SHORTCUTS = {
   scout: { agent: "explore", description: "Delegate focused, read-only codebase reconnaissance to a cheaper model.", guidelines: ["Default to direct inspection. Use scout only for one narrow question that needs more than 2-3 files. Verify only evidence needed for edits. Do not use it for implementation or repeat completed exploration."] },
@@ -42,33 +42,77 @@ function renderCall(agent: string, args: { task?: string; route?: string; name?:
 const oneLine = (text: string) => terminalText(text).replace(/\s+/g, " ").trim();
 // Collapsed cards cut lines at the terminal edge instead of wrapping them.
 const clipped = (lines: string[]) => ({ invalidate() {}, render: (width: number) => lines.map((line) => truncateToWidth(line, width)) });
+function framed(body: Component, theme: Theme): Component {
+  return {
+    invalidate() { body.invalidate(); },
+    render(width) {
+      if (width < 6) return body.render(width).map((line) => truncateToWidth(line, width));
+      const inner = width - 4;
+      const border = (text: string) => theme.fg("borderMuted", text);
+      return [
+        border(`╭${"─".repeat(width - 2)}╮`),
+        ...body.render(inner).map((line) => {
+          const text = truncateToWidth(line, inner);
+          return border("│") + " " + text + " ".repeat(inner - visibleWidth(text) + 1) + border("│");
+        }),
+        border(`╰${"─".repeat(width - 2)}╯`),
+      ];
+    },
+  };
+}
 function renderResult(result: AgentToolResult<unknown>, options: ToolRenderResultOptions, theme: Theme, ctx?: RenderContext) {
   const details = result.details as Partial<JobResult> | undefined;
   const job = details?.job;
   const output = terminalText(details?.output ?? result.content.filter((part) => part.type === "text").map((part) => part.text).join("\n"));
   if (!job) return new Markdown(output, 0, 0, getMarkdownTheme());
   const body = new Container();
-  const header = theme.fg(jobColor(job), `${job.name ?? job.agent} · ${job.status}`) + theme.fg("dim", ` · ${jobSummary(job, details)}`);
-  if (!options.expanded && activeJob(job)) {
-    const activity = output.split("\n").filter((line) => line.trim()).slice(-3).map((line) => theme.fg("dim", "› ") + theme.fg("muted", shortPaths(oneLine(line))));
-    return clipped([header, ...activity, theme.fg("dim", ctx?.hint ?? "ctrl+o to expand")]);
-  }
-  body.addChild(clipped([header]));
+  const status = job.status === "done" ? "Completed" : job.status[0].toUpperCase() + job.status.slice(1);
+  body.addChild({
+    invalidate() {},
+    render(width) {
+      const right = theme.fg(jobColor(job), status) + theme.fg("dim", ` ${elapsed(job.startedAt, job.finishedAt ?? Date.now())}`);
+      const title = theme.fg(jobColor(job), "● ") + theme.fg("toolTitle", oneLine(job.title ?? job.task ?? job.name ?? job.agent));
+      const available = width - visibleWidth(right) - 2;
+      const left = truncateToWidth(title, Math.max(0, available));
+      return [
+        available >= 8
+          ? left + " ".repeat(width - visibleWidth(left) - visibleWidth(right)) + right
+          : truncateToWidth(theme.fg(jobColor(job), `${status} · `) + title, width),
+        truncateToWidth(theme.fg("dim", `${job.name ?? job.agent} · ${job.model}:${job.thinking}`), width),
+      ];
+    },
+  });
   if (options.expanded) {
+    body.addChild({
+      invalidate() {},
+      render: (width) => [truncateToWidth(theme.fg("dim", jobSummary(job, details)), width)],
+    });
     const instructions = details?.instructions ?? ctx?.state?.config?.instructions;
     body.addChild(new Text(`\nTask:\n${terminalText(job.task ?? ctx?.args?.task ?? "")}\n\nAgent instructions:\n${terminalText(instructions ?? "See the durable conversation's saved instructions.")}\n`, 0, 0));
   }
-  body.addChild(new Markdown(options.expanded || job.status === "waiting" ? output : output.split("\n").slice(-6).join("\n"), 0, 0, getMarkdownTheme()));
+  if (!options.expanded && job.status !== "waiting") {
+    const preview = activeJob(job)
+      ? clipped(output.split("\n").filter((line) => line.trim()).slice(-2).map((line) => theme.fg("muted", shortPaths(oneLine(line)))))
+      : new Markdown(output, 0, 0, getMarkdownTheme());
+    body.addChild({
+      invalidate() { preview.invalidate(); },
+      render(width) {
+        return preview.render(width).filter((line) => terminalText(line).trim()).slice(0, 2).map((line) => truncateToWidth(line, width));
+      },
+    });
+    body.addChild(clipped([theme.fg("dim", ctx?.hint ?? "ctrl+o expand · /agents inspect")]));
+  } else body.addChild(new Markdown(output, 0, 0, getMarkdownTheme()));
   if (job.status === "waiting") body.addChild(new Text(theme.fg("warning", `Answer with agent action message, id ${job.name ?? job.id}.`), 0, 0));
   return body;
 }
 
 function renderCard(result: AgentToolResult<unknown>, options: ToolRenderResultOptions, theme: Theme, hint?: string) {
   const job = (result.details as Partial<JobResult> | undefined)?.job;
-  const box = new Box(1, 1, job ? (text) => theme.bg(job.status === "done" ? "toolSuccessBg" : pendingJob(job) ? "toolPendingBg" : "toolErrorBg", text) : undefined);
-  box.addChild(renderResult(result, options, theme, { hint }));
-  if (hint && (!job || !activeJob(job))) box.addChild(clipped([theme.fg("dim", hint)]));
-  return box;
+  if (!job && !hint) return renderResult(result, options, theme);
+  const body = new Container();
+  body.addChild(renderResult(result, options, theme, { hint }));
+  if (hint && (!job || options.expanded || job.status === "waiting")) body.addChild(clipped([theme.fg("dim", hint)]));
+  return framed(body, theme);
 }
 
 type JobProgress = AgentToolResult<Partial<JobResult>>;
@@ -158,11 +202,17 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
     if (!cardOwners.has(id)) cardOwners.set(id, source);
     recoveringCards.delete(id);
     if (cardOwners.get(id) === source && ctx?.invalidate) cardInvalidators.set(id, ctx.invalidate);
+    let cached: { result: JobProgress; hint?: string; card: Component } | undefined;
     return {
-      invalidate() {},
+      invalidate() { cached = undefined; },
       render(width: number) {
         if (cardOwners.get(id) !== source) return [];
-        return renderCard(cardResults.get(id) ?? progress, options, theme, commandJob === id ? "esc cancel" : undefined).render(width);
+        const result = cardResults.get(id) ?? progress;
+        const hint = commandJob === id ? "esc cancel" : undefined;
+        if (!cached || cached.result !== result || cached.hint !== hint) {
+          cached = { result, hint, card: renderCard(result, options, theme, hint) };
+        }
+        return cached.card.render(width);
       },
     };
   };
@@ -175,9 +225,7 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
           const job = [...cardResults.values()].find((result) => result.details.job?.id === args.id || result.details.job?.name === args.id)?.details.job;
           if (job && cardOwners.has(job.id)) return [];
         }
-        const box = new Box(1, 1, (text) => theme.bg("toolPendingBg", text));
-        box.addChild(renderCall(agent, args, theme, ctx));
-        return box.render(width);
+        return framed(renderCall(agent, args, theme, ctx), theme).render(width);
       },
     };
   };

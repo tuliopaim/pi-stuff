@@ -13,6 +13,7 @@ import { MemoryStorage } from "@earendil-works/pi-durable";
 import { AgentSession, CustomMessageComponent, ToolExecutionComponent, initTheme } from "@earendil-works/pi-coding-agent";
 import { terminalText } from "./presentation.ts";
 import tripleEscape from "../triple-escape.ts";
+import { Markdown, visibleWidth } from "@earendil-works/pi-tui";
 
 const plainTheme = { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text, bold: (text: string) => text };
 const widgetContent = (content: any) => typeof content === "function" ? content({}, plainTheme).render(120) : content;
@@ -147,7 +148,8 @@ test("run, repeated waits and completion reports update one native job card", as
   job.status = "done"; output = "Demo complete";
   listener(); await new Promise((resolve) => setTimeout(resolve, 150));
   const rendered = terminalText(run.render(160).join("\n"));
-  assert.match(rendered, /ui-demo · done/);
+  assert.match(rendered, /Completed/);
+  assert.match(rendered, /ui-demo · custom\/worker:high/);
   assert.match(rendered, /Demo complete/);
   assert.doesNotMatch(rendered, /Started demo|in background/);
   assert.ok([...widgets.values()].every((content) => content === undefined));
@@ -179,7 +181,7 @@ test("reloading rebuilds one card from the visible transcript without losing the
   run.updateResult(started);
   const wait = new ToolExecutionComponent("agent", "wait-call", { action: "wait", id: job.name }, {}, tool, tui, process.cwd());
   wait.updateResult(waited);
-  assert.match(terminalText(run.render(160).join("\n")), /ui-demo · done/);
+  assert.match(terminalText(run.render(160).join("\n")), /Completed/);
   assert.deepEqual(wait.render(160), []);
   visible = [last]; // Compaction removed the original run from the displayed transcript.
   await events.get("session_compact")({}, ctx);
@@ -212,7 +214,7 @@ test("aborting a recovered job's native wait does not hide its later question or
   const wait = new ToolExecutionComponent("agent", "wait-call", { action: "wait", id: job.name }, {}, tools.get("agent"), { requestRender() {} } as any, process.cwd());
   wait.updateResult({ content: [{ type: "text", text: output }], details: result(), isError: false }, true);
   wait.updateResult({ content: [{ type: "text", text: "Operation aborted" }], isError: true });
-  assert.match(terminalText(wait.render(160).join("\n")), /worker-1 · running/);
+  assert.match(terminalText(wait.render(160).join("\n")), /worker-1.*Running/);
   job.status = "waiting"; output = "Which tests?";
   listener(); await new Promise((resolve) => setTimeout(resolve, 150));
   assert.match(terminalText(wait.render(160).join("\n")), /Which tests\?/);
@@ -248,11 +250,11 @@ test("all background agent types share live cards and one footer status", async 
   assert.ok(monitor, "background progress must not be special-cased for commit");
   const rendered = widgetContent(monitor.content).join("\n");
   for (const { agent, name } of entries) {
-    assert.ok(rendered.includes(`${name} · running · custom/worker:high`));
+    assert.ok(rendered.includes(`${name} · custom/worker:high`));
     assert.ok(rendered.includes(`Running ${agent}`));
     assert.ok(rendered.includes(`/agents ${name}`));
   }
-  assert.match(rendered, /\$0\.0300/);
+  assert.doesNotMatch(rendered, /\$0\.0300/);
   assert.doesNotMatch(rendered, /Stale output|ctrl\+o/);
   assert.ok(widgets.every(({ name }) => name !== "commit-background"));
 });
@@ -485,6 +487,77 @@ test("management cards use saved child instructions, not the default agent confi
   assert.match(rendered, /Saved review instructions only/);
 });
 
+test("compact cards put the task first, bound previews, and fit narrow terminals", (t) => {
+  const { tools } = harness(t);
+  const tool = tools.get("agent");
+  const job = { id: "compact", name: "review-1", agent: "review", title: "Review 界 cache",
+    task: "Check the cache implementation", model: "custom/saved", thinking: "high", status: "done",
+    startedAt: 1000, finishedAt: 66000 };
+  const result = { content: [], details: { job, output: "First finding\nSecond finding\nThird finding\nLast finding",
+    usage: { input: 1000, output: 200, cost: { total: 0.03 } } } };
+  const card = tool.renderResult(result, { expanded: false, isPartial: false }, plainTheme, { toolCallId: "compact-call" });
+  const lines = card.render(80).map(terminalText);
+  assert.match(lines[0], /╭─/);
+  assert.match(lines[1], /Review 界 cache.*Completed 1m05s/);
+  assert.match(lines[2], /review-1 · custom\/saved:high/);
+  assert.match(lines.join("\n"), /First finding/);
+  assert.doesNotMatch(lines.join("\n"), /Third finding|Last finding|\$0\.0300/);
+  assert.equal(lines.length, 7);
+  for (const width of [1, 4, 6, 20, 40, 80, 120]) {
+    assert.ok(card.render(width).every((line: string) => !line.includes("\n") && visibleWidth(line) <= width));
+  }
+  const expanded = tool.renderResult(result, { expanded: true, isPartial: false }, plainTheme).render(80).join("\n");
+  assert.match(expanded, /Last finding/);
+  assert.match(expanded, /\$0\.0300/);
+  const waiting = tool.renderResult({ ...result, details: { ...result.details, job: { ...job, id: "question", status: "waiting" } } },
+    { expanded: false, isPartial: false }, plainTheme).render(80).join("\n");
+  assert.match(waiting, /Last finding/);
+  assert.match(waiting, /Answer with agent action message/);
+});
+
+test("unchanged live cards reuse Markdown layout across redraws", (t) => {
+  const { tools } = harness(t);
+  const layouts = new Set<string[]>();
+  const render = Markdown.prototype.render;
+  t.mock.method(Markdown.prototype, "render", function (this: Markdown, width: number) {
+    const lines = render.call(this, width);
+    layouts.add(lines);
+    return lines;
+  });
+  const job = { id: "cached", name: "review-1", agent: "review", title: "Review cache",
+    task: "Check the implementation", model: "custom/worker", thinking: "high", status: "done",
+    startedAt: 1000, finishedAt: 2000 };
+  const result = { content: [], details: { job, output: "```typescript\nconst answer = 42;\n```" } };
+  const card = tools.get("agent").renderResult(result, { expanded: false, isPartial: false }, plainTheme, { toolCallId: "cached-call" });
+  card.render(80);
+  assert.equal(layouts.size, 1);
+  card.render(80);
+  assert.equal(layouts.size, 1, "unchanged redraws must reuse the Markdown layout");
+  card.render(40);
+  assert.equal(layouts.size, 2, "resizing must lay out Markdown at the new width");
+  card.invalidate();
+  card.render(40);
+  assert.equal(layouts.size, 3, "invalidation must rebuild the card and its Markdown layout");
+});
+
+test("cached expanded cards refresh elapsed time without a result update", (t) => {
+  const { tools } = harness(t);
+  let now = 2000;
+  t.mock.method(Date, "now", () => now);
+  const job = { id: "elapsed", name: "review-1", agent: "review", title: "Review cache",
+    task: "Check the implementation", model: "custom/worker", thinking: "high", status: "running",
+    startedAt: 1000 };
+  const result = { content: [], details: { job, output: "Reviewing the implementation" } };
+  const card = tools.get("agent").renderResult(result, { expanded: true, isPartial: true }, plainTheme, { toolCallId: "elapsed-call" });
+  const first = terminalText(card.render(80).join("\n"));
+  assert.match(first, /Running 1s/);
+  assert.match(first, /custom\/worker:high · 1s/);
+  now = 4000;
+  const second = terminalText(card.render(80).join("\n"));
+  assert.match(second, /Running 3s/);
+  assert.match(second, /custom\/worker:high · 3s/);
+});
+
 test("streamed route arguments update the call header before the configuration is frozen", (t) => {
   const tool = harness(t).tools.get("agent");
   const ctx = { state: {} };
@@ -517,8 +590,9 @@ test("waiting by job name streams the child's model, usage and latest activity i
   await new Promise((resolve) => setTimeout(resolve, 150));
   assert.ok(updates.length, "wait must stream updates rather than a generic Working box");
   const render = () => tool.renderResult(updates.at(-1), { expanded: false, isPartial: true }, plainTheme, { state: {} }).render(160).join("\n");
-  assert.match(render(), /default-1.*running.*custom\/worker:high/);
-  assert.match(render(), /\$0\.0300/);
+  assert.match(render(), /Running/);
+  assert.match(render(), /default-1 · custom\/worker:high/);
+  assert.doesNotMatch(render(), /\$0\.0300/);
   assert.match(render(), /Running bash/);
   activity = "Finished the implementation; checking tests.";
   for (const listener of listeners) listener();
@@ -705,9 +779,9 @@ test("/commit streams activity, renders its final answer, and removes its input 
   const live = progressCard.render(120).join("\n");
   const shared = tools.get("commit").renderResult({
     content: [], details: { job, output: manager.preview(), usage },
-  }, { expanded: false, isPartial: true }, plainTheme).render(118);
+  }, { expanded: false, isPartial: true }, plainTheme).render(116);
   assert.ok(live.includes(shared[0]), "the command must use the same model/status/usage header as tool cards");
-  assert.match(live, /\$0\.0100/);
+  assert.doesNotMatch(live, /\$0\.0100/);
   assert.match(live, /esc cancel/);
   assert.doesNotMatch(live, /Stale output|ctrl\+o/);
   finish({ job: { ...job, status: "done" }, output: "Created abc123", usage });
@@ -717,7 +791,8 @@ test("/commit streams activity, renders its final answer, and removes its input 
   assert.equal(widgets.at(-1), undefined);
   const theme = { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text };
   const rendered = progressCard.render(80).join("\n");
-  assert.match(rendered, /commit-1 · done/);
+  assert.match(rendered, /Completed/);
+  assert.match(rendered, /commit-1/);
   assert.match(rendered, /Created abc123/);
   assert.deepEqual(renderers.get("agent-result")(sent.at(-1).message, {}, theme).render(80), [], "completion updates the original command card");
   await events.get("session_shutdown")({}, ctx);
