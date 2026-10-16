@@ -31,6 +31,6 @@
   "themes": [
     "~/dotfiles/pi/agent/themes"
   ],
-  "theme": "github-dark-default",
+  "theme": "t3-dark",
   "showCacheMissNotices": true
 }
