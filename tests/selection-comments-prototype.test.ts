@@ -189,7 +189,7 @@ test("global note shortcuts use F6/F7/F8 instead of Alt", () => {
   assert.ok(shortcuts.get("f8")?.description?.includes("Send all"));
 });
 
-test("the Comment button uses readable text on a neutral background", () => {
+test("the Comment button uses readable text on the theme's user-message background", () => {
   const h = harness();
   const tokens: string[] = [];
   const palette = {
@@ -201,7 +201,8 @@ test("the Comment button uses readable text on a neutral background", () => {
   try {
     h.select();
     assert.ok(tokens.includes("fg:text:Comment"));
-    assert.ok(tokens.includes("bg:toolPendingBg"));
+    assert.ok(tokens.includes("bg:userMessageBg"));
+    assert.ok(!tokens.includes("bg:toolPendingBg"));
     assert.ok(!tokens.includes("fg:accent:Comment"));
   } finally { styled.dispose(); h.close(); }
 });
@@ -334,15 +335,21 @@ test("the compact card keeps its frame, placeholder, and editor mouse positions 
   } finally { h.close(); }
 });
 
-test("the card keeps a neutral background after cursor and button resets", () => {
+test("the card keeps the theme's user-message background after cursor and button resets", () => {
   const h = harness();
   try {
     const bg = "\x1b[48;5;236m";
     const selected = "\x1b[44m";
     const coloredTheme = {
       ...theme,
-      getBgAnsi: () => bg,
-      bg: (color: string, text: string) => `${color === "selectedBg" ? selected : bg}${text}\x1b[49m`,
+      getBgAnsi: (color: string) => {
+        assert.equal(color, "userMessageBg");
+        return bg;
+      },
+      bg: (color: string, text: string) => {
+        assert.ok(color === "selectedBg" || color === "userMessageBg");
+        return `${color === "selectedBg" ? selected : bg}${text}\x1b[49m`;
+      },
     } as unknown as Theme;
     const dialog = new CommentDialog(h.tui, coloredTheme, "Some quoted text", () => {});
     dialog.focused = true;

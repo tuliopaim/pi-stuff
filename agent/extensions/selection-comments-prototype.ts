@@ -265,8 +265,8 @@ export class CommentDialog extends Box implements Focusable {
       ...content.map((line) => border("│") + sliceByColumn(line, 1, width - 2) + border("│")),
       border(`╰${"─".repeat(width - 2)}╯`),
     ];
-    const bg = this.theme.getBgAnsi("toolPendingBg");
-    return lines.map((line) => this.theme.bg("toolPendingBg", line.replace(/\x1b\[(?:0|49)m/g, `$&${bg}`)));
+    const bg = this.theme.getBgAnsi("userMessageBg");
+    return lines.map((line) => this.theme.bg("userMessageBg", line.replace(/\x1b\[(?:0|49)m/g, `$&${bg}`)));
   }
 
   override handleMouse(event: TuiMouseEvent) {
@@ -478,7 +478,7 @@ export class SelectionComments implements Component {
     this.dismissCite();
     if (this.disposed || this.cancelComment || this.tui.hasOverlay()) return;
     this.cite = this.tui.showOverlay(new MouseRegion({
-      render: (width) => [this.theme.bg("toolPendingBg", truncateToWidth(
+      render: (width) => [this.theme.bg("userMessageBg", truncateToWidth(
         this.theme.fg("accent", " + ") + this.theme.fg("text", "Comment") + " ", width, ""))],
       invalidate() {},
     }, (event) => {
