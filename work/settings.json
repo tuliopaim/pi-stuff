@@ -1,0 +1,28 @@
+{
+  "defaultProvider": "anthropic",
+  "defaultModel": "claude-opus-5-5",
+  "defaultThinkingLevel": "high",
+  "enabledModels": [
+    "anthropic/claude-opus-5-5:high",
+    "anthropic/claude-sonnet-5-5:medium",
+    "anthropic/claude-haiku-5-5:low"
+  ],
+  "packages": [
+    {
+      "source": "npm:@plannotator/pi-extension",
+      "skills": []
+    },
+    "git:github.com/DietrichGebert/ponytail",
+    "npm:pi-optmem@1.0.0"
+  ],
+  "extensions": ["~/dotfiles/pi/agent/extensions"],
+  "prompts": ["~/dotfiles/pi/agent/prompts"],
+  "skills": [
+    "~/dotfiles/private/skills/work-services",
+    "~/dotfiles/private/skills/health-scout"
+  ],
+  "editorPaddingX": 2,
+  "treeFilterMode": "no-tools",
+  "theme": "dark",
+  "showCacheMissNotices": true
+}

@@ -104,6 +104,48 @@ Children use Pi's built-in tools and trust-aware project instructions and skills
 
 This replaces the old `subagent_*` tool family, Markdown agent profiles, session modes, and `/btw`. Old JSON registries and child session files are left untouched, but are not imported into Durable. These compatibility features and executable extension inheritance remain unrestored. `/commit` shows its task immediately, then elapsed time, model, and recent tool activity while it runs. Escape cancels it. Success, failure, and cancellation leave a result in the conversation, including failures during setup. Delegation tool cards show model, time, activity, usage, and expandable task/instructions.
 
+## Work profile
+
+Run `piw` for company Anthropic work. The launcher at `~/dotfiles/scripts/piw`
+creates `~/.pi-work/agent` on first use from [`work/`](work/), then preserves
+local settings and credentials. It starts Opus with high thinking and locks
+named agents and workflows to the existing `anthropic-work` preset. Use
+`piw --model anthropic/claude-sonnet-5-5` to start on Sonnet instead.
+
+The profile reuses the shared extensions, prompts, and package declarations.
+Sessions, provider credentials, and subagent state stay separate from normal
+Pi. OptMem deliberately remains shared, so work notes can appear in personal
+sessions. Existing machine-wide EMS/Jira skills remain available as before;
+`work-services` and `health-scout` load only in this work profile and Claude work.
+
+PostgreSQL uses the existing `~/.claude-work/bin/postgres-mcp` launcher and
+Keychain-backed read-only profiles. Tools load through search; modification,
+CSV import, and connection-editing tools are hidden. Grafana continues to use
+`~/.claude-work/bin/gcx` and its existing Keychain login. No database password
+or Grafana token is copied.
+
+The Anthropic credential resolves the Keychain item `pi-anthropic-work`, account
+`anthropic`. To enroll or replace it, run this in your terminal and enter the
+key at the private prompt, never in chat or a command argument:
+
+```sh
+security add-generic-password -U -a anthropic -s pi-anthropic-work -w
+piw auth check --provider anthropic --json
+piw mcp list
+```
+
+The explicit work guard loads even with `--no-extensions`. It disables
+non-Anthropic provider authentication and execution, including ambient cloud
+credentials, and rejects Anthropic endpoint/API overrides that do not use the
+direct Anthropic Messages API. It reapplies on startup, model changes, new turns,
+and compaction. This prevents accidental provider switching; it is not a sandbox against trusted
+extensions that deliberately replace providers or make their own HTTP requests.
+Web search still sends search terms to its configured search provider.
+
+Exit `piw` and open normal `pi` to do personal work. Do not carry a work
+conversation into another provider. The launcher does not change normal Pi's
+settings, and it never copies personal provider logins into the work profile.
+
 ## Interactive questions
 
 The `ask_user` tool asks one question with 2–5 likely answers and a free-form fallback. Arrow keys or number keys select an option; Escape goes back or dismisses it.
@@ -184,4 +226,14 @@ npm run test:agents --prefix ~/dotfiles/pi/agent
 npm run typecheck:agents --prefix ~/dotfiles/pi/agent
 npm run test:workflows --prefix ~/dotfiles/pi/agent
 npm run typecheck:web-tools --prefix ~/dotfiles/pi/agent
+python3 ~/dotfiles/scripts/tests/piw.test.py
+```
+
+The work guard's host-runtime regression test needs Pi 1.3. Set
+`PI_TEST_HOST_DIR` to the installed `@earendil-works/pi-coding-agent` package
+before running `npm test`, or run it directly:
+
+```sh
+PI_TEST_HOST_DIR=/path/to/pi-coding-agent \
+  node --test --experimental-strip-types ~/dotfiles/pi/tests/work-guard-host.test.ts
 ```

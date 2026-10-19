@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "work-postgres": {
+      "command": "~/.claude-work/bin/postgres-mcp",
+      "args": ["run", "--no-telemetry", "--log-level", "warning"],
+      "env": {
+        "POSTGRES_MCP_QUERY_TIMEOUT_MS": "120000",
+        "POSTGRES_MCP_DISABLE_CWD_ACCESS": "1"
+      },
+      "timeout": 150,
+      "exposure": "deferred",
+      "toolExposure": {
+        "postgres_mcp_modify": "hidden",
+        "postgres_mcp_bulk_load_csv": "hidden",
+        "postgres_mcp_add_connection": "hidden",
+        "postgres_mcp_remove_connection": "hidden"
+      },
+      "description": "Read-only EMS PostgreSQL profiles for E2, EOB, and Master Patient in dev, stage, and prod. Use work-services for profile selection."
+    }
+  }
+}
