@@ -152,6 +152,22 @@ for (const [preset, provider] of [["copilot", "github-copilot"], ["anthropic-wor
   });
 }
 
+test("piw locks the work preset independently of environment, saved choices, and routes", (t) => {
+  setup(t);
+  const previous = process.env.PI_WORK_PROFILE;
+  process.env.PI_WORK_PROFILE = "1";
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_WORK_PROFILE; else process.env.PI_WORK_PROFILE = previous;
+  });
+  process.env.PI_SUBAGENT_PRESET = "personal";
+  assert.ok(Object.values(getAgents()).every((agent) => agent.model.startsWith("anthropic/")));
+  assert.throws(() => setSubagentPreset("personal"), /piw requires/);
+  setSubagentPreset(undefined);
+  assert.throws(() => resolveAgent("default", "openai/model"), /only permits/);
+  assert.equal(validateRoute("openai/model", "medium").allowed, false);
+  assert.throws(() => saveAgentModel("default", "openai/model", "medium"), /only permits/);
+});
+
 test("malformed configuration and unknown presets fail closed", (t) => {
   const directory = setup(t);
   const file = join(directory, "agents.json");

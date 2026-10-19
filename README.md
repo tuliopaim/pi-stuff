@@ -104,6 +104,7 @@ Children use Pi's built-in tools and trust-aware project instructions and skills
 
 This replaces the old `subagent_*` tool family, Markdown agent profiles, session modes, and `/btw`. Old JSON registries and child session files are left untouched, but are not imported into Durable. These compatibility features and executable extension inheritance remain unrestored. `/commit` shows its task immediately, then elapsed time, model, and recent tool activity while it runs. Escape cancels it. Success, failure, and cancellation leave a result in the conversation, including failures during setup. Delegation tool cards show model, time, activity, usage, and expandable task/instructions.
 
+
 ## Interactive questions
 
 The `ask_user` tool asks one question with 2–5 likely answers and a free-form fallback. Arrow keys or number keys select an option; Escape goes back or dismisses it.
@@ -184,4 +185,14 @@ npm run test:agents --prefix ~/dotfiles/pi/agent
 npm run typecheck:agents --prefix ~/dotfiles/pi/agent
 npm run test:workflows --prefix ~/dotfiles/pi/agent
 npm run typecheck:web-tools --prefix ~/dotfiles/pi/agent
+python3 ~/dotfiles/scripts/tests/piw.test.py
+```
+
+The work guard's host-runtime regression test needs Pi 1.3. Set
+`PI_TEST_HOST_DIR` to the installed `@earendil-works/pi-coding-agent` package
+before running `npm test`, or run it directly:
+
+```sh
+PI_TEST_HOST_DIR=/path/to/pi-coding-agent \
+  node --test --experimental-strip-types ~/dotfiles/pi/tests/work-guard-host.test.ts
 ```

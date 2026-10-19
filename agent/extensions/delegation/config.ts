@@ -53,6 +53,7 @@ function mergedConfig(): Config {
 }
 
 export function getActiveSubagentPresetName() {
+  if (process.env.PI_WORK_PROFILE === "1") return "anthropic-work";
   return sessionPreset ?? (process.env.PI_SUBAGENT_PRESET?.trim() || undefined) ?? mergedConfig().preset;
 }
 export function getSubagentProviderRestriction(): string | undefined {
@@ -68,6 +69,9 @@ function assertSubagentProvider(model: string) {
 }
 export function getSubagentPresetNames() { return Object.keys(mergedConfig().presets ?? {}); }
 export function setSubagentPreset(name: string | undefined) {
+  if (process.env.PI_WORK_PROFILE === "1" && name !== undefined && name !== "anthropic-work") {
+    throw new Error("piw requires the anthropic-work preset. Open normal pi for other providers.");
+  }
   if (name !== undefined && !getSubagentPresetNames().includes(name)) throw new Error(`Unknown agent preset "${name}"`);
   sessionPreset = name;
 }
