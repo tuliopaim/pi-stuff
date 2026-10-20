@@ -46,7 +46,7 @@ Current defaults:
 
 - `enabled`: `true`
 - `provider`: `exa`
-- `endpoint`: configured in `settings.ts`
+- `endpoint`: `https://mcp.exa.ai/mcp` (same public Exa MCP endpoint opencode uses)
 - `timeoutSeconds`: `25`
 - `defaultMaxResults`: `8`
 - `defaultDepth`: `auto`
@@ -58,7 +58,7 @@ Behavior notes:
 - search responses are limited to `1 MB`
 - provider requests currently send:
   - `livecrawl: "fallback"`
-  - `contextMaxCharacters: 2000`
+  - `contextMaxCharacters: 10000`
 
 ## Configuration
 
