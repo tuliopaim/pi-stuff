@@ -29,11 +29,11 @@ The checked-in defaults are in [`agent/agents.json`](agent/agents.json). Persona
 {
   "agents": {
     "default": {
-      "model": "openai-codex/gpt-6-sol",
+      "model": "openai/gpt-6-sol",
       "thinking": "medium"
     },
     "research": {
-      "model": "openai-codex/gpt-6-luna",
+      "model": "openai/gpt-6-luna",
       "thinking": "high",
       "description": "Read-only research",
       "tools": ["read", "grep", "find", "ls"],
@@ -54,7 +54,7 @@ Presets are optional model/thinking overrides keyed directly by agent name. Ther
   "presets": {
     "personal": {},
     "budget": {
-      "review": { "model": "openai-codex/gpt-6-luna", "thinking": "high" }
+      "review": { "model": "openai/gpt-6-luna", "thinking": "high" }
     }
   }
 }

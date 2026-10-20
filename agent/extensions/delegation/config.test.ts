@@ -39,7 +39,7 @@ test("named agents have a general-purpose default and safe specialist tool sets"
 test("worktree setup uses Luna and shell tools without implementation tools", (t) => {
   setup(t);
   const agent = resolveAgent("setup-wt");
-  assert.equal(agent.model, "openai-codex/gpt-6-luna");
+  assert.equal(agent.model, "openai/gpt-6-luna");
   assert.equal(agent.thinking, "medium");
   assert.deepEqual(agent.tools, ["read", "grep", "find", "ls", "bash"]);
   assert.match(agent.instructions, /setup-wt\/SKILL\.md/);
@@ -95,7 +95,7 @@ test("presets honor environment then session overrides; copilot cannot leak to a
   assert.ok(Object.values(getAgents()).every((agent) => agent.model.startsWith("github-copilot/")));
   assert.throws(() => resolveAgent("default", "openai/model"), /only permits/);
   setSubagentPreset("openai");
-  assert.equal(resolveAgent().model, "openai-codex/gpt-6.1-sol");
+  assert.equal(resolveAgent().model, "openai/gpt-6.1-sol");
   assert.throws(() => setSubagentPreset("missing"), /Unknown agent preset/);
 });
 
