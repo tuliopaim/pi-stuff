@@ -8,7 +8,7 @@
         "POSTGRES_MCP_DISABLE_CWD_ACCESS": "1"
       },
       "timeout": 150,
-      "exposure": "deferred",
+      "exposure": "direct",
       "toolExposure": {
         "postgres_mcp_modify": "hidden",
         "postgres_mcp_bulk_load_csv": "hidden",
