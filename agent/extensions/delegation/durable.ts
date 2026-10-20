@@ -183,7 +183,8 @@ export class AgentJobs {
       const harness = await Harness.open(storage, {
         models: options.models, registry,
         env: ({ cwd }) => new NodeExecutionEnv({ cwd: cwd ?? process.cwd() }),
-        settings: { stream: { timeoutMs: 120_000, deferred: false } },
+        // Subagents run back-to-back, so the 5-minute cache is enough and its writes are cheaper than 1-hour ones.
+        settings: { stream: { timeoutMs: 120_000, deferred: false, cacheRetention: "short" } },
       }, BACKGROUND_CONTEXT);
       return new AgentJobs(harness, options.models, registry.snapshot().tools().map(({ tool }) => tool), options.database, release);
     } catch (error) { release?.(); throw error; }
