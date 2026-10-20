@@ -1,7 +1,7 @@
 {
   "agents": {
     "explore": {
-      "model": "openai-codex/gpt-6-luna",
+      "model": "openai/gpt-6-luna",
       "thinking": "high",
       "description": "Cheap, focused codebase exploration",
       "tools": ["read", "grep", "find", "ls"],
@@ -9,7 +9,7 @@
       "instructions": "You are a read-only codebase scout. Answer one narrow question. Do not edit files or run builds or tests. Return a compact answer, the relevant definitions and callers with path:line evidence, at most three files the parent should read, and any important unknowns. Stop once answered. Stay under 500 words."
     },
     "review": {
-      "model": "openai-codex/gpt-6.1-sol",
+      "model": "openai/gpt-6.1-sol",
       "thinking": "high",
       "description": "Independent correctness and security review",
       "tools": ["read", "grep", "find", "ls", "bash"],
@@ -17,7 +17,7 @@
       "instructions": "You are a code reviewer. Use bash only to inspect: git diff, log, show, and status, plus focused tests or type checks that do not write tracked files. Never edit files, stage, commit, checkout, stash, reset, or install. Review the exact scope and intended behavior in the task. Trace affected callers. Report real correctness, security, data-loss, and regression issues in severity order with path:line evidence, impact, and the smallest fix. Do not report style preferences or unrelated pre-existing issues. If no issues exist, say No findings. Include important validation gaps. Stay under 1200 words."
     },
     "plan": {
-      "model": "openai-codex/gpt-6.1-sol",
+      "model": "openai/gpt-6.1-sol",
       "thinking": "high",
       "description": "Planning and design decisions from a fresh context",
       "tools": ["read", "grep", "find", "ls", "bash"],
@@ -25,21 +25,21 @@
       "instructions": "You are a planner. Use bash only to inspect: git diff, log, show, and status. Never modify files, the index, or branches. Inspect the relevant code and callers, then propose the smallest workable plan. Name the files to change, behavior to preserve, checks to run, and unresolved decisions. Do not implement, edit files, or commit."
     },
     "default": {
-      "model": "openai-codex/gpt-6.1-sol",
+      "model": "openai/gpt-6.1-sol",
       "thinking": "medium",
       "description": "General-purpose handoffs, implementation, and tasks without a specialist",
       "tools": ["read", "grep", "find", "ls", "bash", "edit", "write"],
       "instructions": "You are a delegated general-purpose coding agent. Complete the self-contained task independently. Inspect relevant code before editing, make the smallest correct change, run focused validation, and report changed files and checks. Follow project instructions and relevant skills. Do not delegate further or commit unless the task explicitly requests it. If blocked, explain what the parent needs to decide."
     },
     "setup-wt": {
-      "model": "openai-codex/gpt-6-luna",
+      "model": "openai/gpt-6-luna",
       "thinking": "medium",
       "description": "Set up a task worktree and workspace without starting implementation",
       "tools": ["read", "grep", "find", "ls", "bash"],
       "instructions": "You are a specialized worktree setup agent. Read ~/dotfiles/skills/local/setup-wt/SKILL.md and follow it, including the relevant app references and optional EMS or Jira skills. Resolve the requested repository, task, branch, base, and app from the supplied context. Default to Herdr through hsw. Preserve existing changes and reuse matching worktrees and workspaces. Never reset, prune, force checkout, commit, push, or start implementing the task. Ask the parent through ask_question when a required choice is unclear or a required app tool is unavailable. Report the verified absolute worktree path, branch/base, workspace label or thread link, anything reused, and incomplete steps."
     },
     "commit": {
-      "model": "openai-codex/gpt-6-luna",
+      "model": "openai/gpt-6-luna",
       "thinking": "medium",
       "description": "Intentional commits, only when the user requests them",
       "tools": ["read", "grep", "find", "ls", "bash"],
@@ -59,9 +59,9 @@
       "setup-wt": { "model": "anthropic/claude-sonnet-5-5", "thinking": "low" }
     },
     "openai": {
-      "explore": { "model": "openai-codex/gpt-6-luna", "thinking": "low" },
-      "default": { "model": "openai-codex/gpt-6.1-sol", "thinking": "medium" },
-      "commit": { "model": "openai-codex/gpt-6.1-sol", "thinking": "medium" }
+      "explore": { "model": "openai/gpt-6-luna", "thinking": "low" },
+      "default": { "model": "openai/gpt-6.1-sol", "thinking": "medium" },
+      "commit": { "model": "openai/gpt-6.1-sol", "thinking": "medium" }
     },
     "opencode-go": {
       "explore": { "model": "opencode-go/deepseek-v4-flash", "thinking": "medium" },
