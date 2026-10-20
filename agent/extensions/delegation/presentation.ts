@@ -1,5 +1,6 @@
 import type { Job, JobMetadata } from "./durable.ts";
 import { homedir } from "node:os";
+import { truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import { formatCompactTokens, formatContextUtilization } from "../shared/context-utilization.ts";
 
 // Strip terminal controls before displaying model output or tool arguments.
@@ -44,7 +45,7 @@ export function jobActivity(job: Job, preview = "") {
 }
 
 type Theme = { fg: (color: any, text: string) => string; bold?: (text: string) => string };
-const STATUS_ICONS: Record<string, string> = { running: "●", waiting: "?", stalled: "◌", done: "✓", failed: "✗", cancelled: "–" };
+export const STATUS_ICONS: Record<string, string> = { running: "●", waiting: "?", stalled: "◌", done: "✓", failed: "✗", cancelled: "–" };
 export const shortPaths = (text: string) => text.split(homedir()).join("~");
 
 export function statusCounts(jobs: Job[], theme: Theme) {
@@ -52,4 +53,33 @@ export function statusCounts(jobs: Job[], theme: Theme) {
     const matching = jobs.filter((job) => job.status === status);
     return matching.length ? [theme.fg(jobColor(matching[0]), `${STATUS_ICONS[status]} ${matching.length} ${status}`)] : [];
   }).join(theme.fg("dim", " · "));
+}
+
+export const statusLabel = (job: Job) => job.status === "done" ? "Completed" : job.status[0].toUpperCase() + job.status.slice(1);
+
+// Puts `right` flush against the right edge, dropping it when the line is too narrow.
+export function spread(left: string, right: string, width: number) {
+  const available = width - visibleWidth(right) - 2;
+  if (available < 8) return truncateToWidth(left, width);
+  const text = truncateToWidth(left, available);
+  return text + " ".repeat(width - visibleWidth(text) - visibleWidth(right)) + right;
+}
+
+export function framed(body: Component, theme: Theme, borderColor = "borderMuted"): Component {
+  return {
+    invalidate() { body.invalidate(); },
+    render(width) {
+      if (width < 6) return body.render(width).map((line) => truncateToWidth(line, width));
+      const inner = width - 4;
+      const border = (text: string) => theme.fg(borderColor, text);
+      return [
+        border(`╭${"─".repeat(width - 2)}╮`),
+        ...body.render(inner).map((line) => {
+          const text = truncateToWidth(line, inner);
+          return border("│") + " " + text + " ".repeat(inner - visibleWidth(text) + 1) + border("│");
+        }),
+        border(`╰${"─".repeat(width - 2)}╯`),
+      ];
+    },
+  };
 }

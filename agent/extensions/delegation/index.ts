@@ -11,7 +11,7 @@ import { configPath, getActiveSubagentPresetName, getAgents, getSubagentPresetNa
 import { AgentJobs, modelsFromRegistry, type Job, type JobResult } from "./durable.ts";
 import { registerDynamicRouteGuidance } from "./runtime.ts";
 import { showAgents } from "./dashboard.ts";
-import { activeJob, elapsed, jobColor, jobSummary, pendingJob, shortPaths, statusCounts, terminalText } from "./presentation.ts";
+import { activeJob, elapsed, framed, jobColor, jobSummary, pendingJob, shortPaths, spread, statusCounts, statusLabel, terminalText } from "./presentation.ts";
 
 const SHORTCUTS = {
   scout: { agent: "explore", description: "Delegate focused, read-only codebase reconnaissance to a cheaper model.", guidelines: ["Default to direct inspection. Use scout only for one narrow question that needs more than 2-3 files. Verify only evidence needed for edits. Do not use it for implementation or repeat completed exploration."] },
@@ -42,42 +42,20 @@ function renderCall(agent: string, args: { task?: string; route?: string; name?:
 const oneLine = (text: string) => terminalText(text).replace(/\s+/g, " ").trim();
 // Collapsed cards cut lines at the terminal edge instead of wrapping them.
 const clipped = (lines: string[]) => ({ invalidate() {}, render: (width: number) => lines.map((line) => truncateToWidth(line, width)) });
-function framed(body: Component, theme: Theme): Component {
-  return {
-    invalidate() { body.invalidate(); },
-    render(width) {
-      if (width < 6) return body.render(width).map((line) => truncateToWidth(line, width));
-      const inner = width - 4;
-      const border = (text: string) => theme.fg("borderMuted", text);
-      return [
-        border(`╭${"─".repeat(width - 2)}╮`),
-        ...body.render(inner).map((line) => {
-          const text = truncateToWidth(line, inner);
-          return border("│") + " " + text + " ".repeat(inner - visibleWidth(text) + 1) + border("│");
-        }),
-        border(`╰${"─".repeat(width - 2)}╯`),
-      ];
-    },
-  };
-}
 function renderResult(result: AgentToolResult<unknown>, options: ToolRenderResultOptions, theme: Theme, ctx?: RenderContext) {
   const details = result.details as Partial<JobResult> | undefined;
   const job = details?.job;
   const output = terminalText(details?.output ?? result.content.filter((part) => part.type === "text").map((part) => part.text).join("\n"));
   if (!job) return new Markdown(output, 0, 0, getMarkdownTheme());
   const body = new Container();
-  const status = job.status === "done" ? "Completed" : job.status[0].toUpperCase() + job.status.slice(1);
+  const status = statusLabel(job);
   body.addChild({
     invalidate() {},
     render(width) {
       const right = theme.fg(jobColor(job), status) + theme.fg("dim", ` ${elapsed(job.startedAt, job.finishedAt ?? Date.now())}`);
       const title = theme.fg(jobColor(job), "● ") + theme.fg("toolTitle", oneLine(job.title ?? job.task ?? job.name ?? job.agent));
-      const available = width - visibleWidth(right) - 2;
-      const left = truncateToWidth(title, Math.max(0, available));
       return [
-        available >= 8
-          ? left + " ".repeat(width - visibleWidth(left) - visibleWidth(right)) + right
-          : truncateToWidth(theme.fg(jobColor(job), `${status} · `) + title, width),
+        width - visibleWidth(right) - 2 >= 8 ? spread(title, right, width) : truncateToWidth(theme.fg(jobColor(job), `${status} · `) + title, width),
         truncateToWidth(theme.fg("dim", `${job.name ?? job.agent} · ${job.model}:${job.thinking}`), width),
       ];
     },
@@ -148,6 +126,12 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
   let unsubscribeInterrupt: (() => void) | undefined;
   let updateTimer: ReturnType<typeof setTimeout> | undefined;
   let flushing = false;
+  let activityActive = false;
+  const publishActivity = (active: boolean) => {
+    if (active === activityActive) return;
+    activityActive = active;
+    pi.events.emit("herdr:activity", { source: "subagents", active });
+  };
   const pendingReports = new Set<string>();
   const reportedUsage = new Map<string, Usage>();
   const foregroundWaits = new Map<string, number>();
@@ -202,15 +186,21 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
     if (!cardOwners.has(id)) cardOwners.set(id, source);
     recoveringCards.delete(id);
     if (cardOwners.get(id) === source && ctx?.invalidate) cardInvalidators.set(id, ctx.invalidate);
-    let cached: { result: JobProgress; hint?: string; card: Component } | undefined;
+    let cached: { result: JobProgress; hint?: string; compact: boolean; card: Component } | undefined;
     return {
       invalidate() { cached = undefined; },
       render(width: number) {
         if (cardOwners.get(id) !== source) return [];
         const result = cardResults.get(id) ?? progress;
         const hint = commandJob === id ? "esc cancel" : undefined;
-        if (!cached || cached.result !== result || cached.hint !== hint) {
-          cached = { result, hint, card: renderCard(result, options, theme, hint) };
+        const job = result.details.job!;
+        const compact = !options.expanded && job.background && activeJob(job) && !foregroundWaits.has(id);
+        if (!cached || cached.result !== result || cached.hint !== hint || cached.compact !== compact) {
+          const card = compact ? clipped([
+            theme.fg("toolTitle", `Started agent ${oneLine(job.name ?? job.id)} · ${oneLine(job.title ?? job.task ?? job.agent)}`),
+            theme.fg("dim", `/agents ${oneLine(job.name ?? job.id)} to inspect or cancel`),
+          ]) : renderCard(result, options, theme, hint);
+          cached = { result, hint, compact, card };
         }
         return cached.card.render(width);
       },
@@ -260,6 +250,7 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
     if (!current || !ctx) return;
     const entries = await current.list();
     if (current !== jobs) return;
+    publishActivity(ctx.mode === "tui" && entries.some(activeJob));
     if (ctx.hasUI) {
       const theme = ctx.ui.theme;
       ctx.ui.setStatus("subagents", entries.some(pendingJob) ? `${theme.fg("muted", "agents:")} ${statusCounts(entries.filter(pendingJob), theme)} ${theme.fg("dim", "/agents")}` : undefined);
@@ -273,9 +264,10 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
         const progress = await Promise.all(refresh.map(async (job) => jobProgress(current, await current.result(job.id))));
         if (current !== jobs) return;
         for (const result of progress) publish(result);
+        // Active background transcripts are receipts; live progress stays pinned.
         const background = progress.filter((result) => {
           const job = result.details.job!;
-          return job.background && activeJob(job) && !cardOwners.has(job.id) && !foregroundWaits.has(job.id);
+          return job.background && activeJob(job) && !foregroundWaits.has(job.id);
         });
         ctx.ui.setWidget("subagents-monitor", background.length ? (_tui, theme) => {
           const cards = new Container();
@@ -356,6 +348,7 @@ export default function delegation(pi: ExtensionAPI, openJobs = AgentJobs.open) 
     if (updateTimer) clearTimeout(updateTimer);
     updateTimer = undefined;
     const closing = jobs; jobs = undefined; context = undefined;
+    publishActivity(false);
     pendingReports.clear();
     reportedUsage.clear();
     foregroundWaits.clear();

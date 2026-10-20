@@ -1,9 +1,9 @@
 import { AssistantMessageComponent, UserMessageComponent, ToolExecutionComponent, createBashToolDefinition, createReadToolDefinition, createEditToolDefinition, createWriteToolDefinition, createGrepToolDefinition, createFindToolDefinition, createLsToolDefinition, getMarkdownTheme, type ExtensionContext, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
 import type { Message } from "@earendil-works/pi-ai";
-import { Input, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type Focusable, type TUI } from "@earendil-works/pi-tui";
+import { Input, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type Focusable, type TUI, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
 import type { AgentJobs, Job, JobMetadata } from "./durable.ts";
 import { getActiveSubagentPresetName, getAgents } from "./config.ts";
-import { activeJob, elapsed, jobActivity, jobColor as color, jobSummary, jobTitle, pendingJob, terminalText } from "./presentation.ts";
+import { activeJob, elapsed, framed, jobActivity, jobColor as color, pendingJob, shortPaths, spread, STATUS_ICONS, statusLabel, terminalText, toolSummary, usageText } from "./presentation.ts";
 
 type Theme = ExtensionContext["ui"]["theme"];
 type Action = "configure" | "preset" | undefined;
@@ -17,14 +17,48 @@ const toolDefinitions = {
   write: createWriteToolDefinition, grep: createGrepToolDefinition, find: createFindToolDefinition, ls: createLsToolDefinition,
 };
 
-export function timelineBar(job: Job, start: number, end: number, width: number) {
-  const cells = Array<string>(Math.max(3, width)).fill(" ");
-  const position = (time: number) => Math.max(0, Math.min(cells.length - 1, Math.round((time - start) / Math.max(1, end - start) * (cells.length - 1))));
-  const first = position(job.startedAt), last = Math.max(first, position(job.finishedAt ?? end));
-  cells[first] = first === last ? "◆" : "├";
-  for (let i = first + 1; i < last; i++) cells[i] = "━";
-  cells[last] = pendingJob(job) ? "▶" : first === last ? "◆" : "┤";
-  return cells.join("");
+const oneLine = (text: string) => shortPaths(terminalText(text).replace(/\s+/g, " ").trim());
+// Jobs that need the user come first, then live work, then history.
+const rank = (job: Job) => job.status === "waiting" ? 0 : activeJob(job) ? 1 : 2;
+
+type Expandable = Component & { expanded: boolean };
+
+// One dim line per tool call; ctrl+o swaps in Pi's native tool card.
+class ToolLine implements Expandable {
+  expanded = false;
+  private done = false;
+  private error?: string;
+  readonly tool: ToolExecutionComponent;
+  private summary: string;
+  private theme: Theme;
+  constructor(tool: ToolExecutionComponent, summary: string, theme: Theme) { this.tool = tool; this.summary = summary; this.theme = theme; }
+  update(result: Parameters<ToolExecutionComponent["updateResult"]>[0]) {
+    this.done = true;
+    this.error = result.isError ? result.content.flatMap((part) => part.type === "text" ? (part.text ?? "").split("\n") : []).find((line) => line.trim()) ?? "Error" : undefined;
+    this.tool.updateResult(result);
+  }
+  invalidate() { this.tool.invalidate(); }
+  render(width: number) {
+    if (this.expanded) return this.tool.render(width);
+    const theme = this.theme;
+    const icon = this.error !== undefined ? theme.fg("error", "✗") : this.done ? theme.fg("success", "✓") : theme.fg("warning", "…");
+    return [truncateToWidth(`  ${icon} ${theme.fg("dim", this.summary)}`, width),
+      ...(this.error !== undefined ? [truncateToWidth(`    ${theme.fg("error", oneLine(this.error))}`, width)] : [])];
+  }
+}
+
+// Task prompts can be pages long; show their opening until expanded.
+class Clamp implements Expandable {
+  expanded = false;
+  private child: Component;
+  private theme: Theme;
+  private max: number;
+  constructor(child: Component, theme: Theme, max = 4) { this.child = child; this.theme = theme; this.max = max; }
+  invalidate() { this.child.invalidate(); }
+  render(width: number) {
+    const lines = this.child.render(width);
+    return this.expanded || lines.length <= this.max + 1 ? lines : [...lines.slice(0, this.max), this.theme.fg("dim", truncateToWidth(`  … ${lines.length - this.max} more lines · ctrl+o`, width))];
+  }
 }
 
 export class Dashboard implements Component, Focusable {
@@ -40,6 +74,10 @@ export class Dashboard implements Component, Focusable {
   private offset = 0;
   private toolsExpanded = false;
   private hideThinking = true;
+  private showInfo = false;
+  private confirmCancel?: string;
+  private autoAnswered?: string;
+  private bodyHeight = 10;
   private input = new Input();
   private inputMode = false;
   private _focused = false;
@@ -84,7 +122,7 @@ export class Dashboard implements Component, Focusable {
     if (this.refreshing) { this.refreshAgain = true; return; }
     this.refreshing = true;
     try {
-      const entries = [...(await this.jobs?.list() ?? [])].sort((a, b) => (b.createdAt ?? b.startedAt) - (a.createdAt ?? a.startedAt));
+      const entries = [...(await this.jobs?.list() ?? [])].sort((a, b) => rank(a) - rank(b) || (b.createdAt ?? b.startedAt) - (a.createdAt ?? a.startedAt));
       if (this.closed) return;
       this.entries = entries;
       const stable = entries.findIndex((job) => job.id === this.selectedId);
@@ -100,6 +138,9 @@ export class Dashboard implements Component, Focusable {
           if (detail) {
             this.detailId = canonical; this.messages = messages ?? [];
             this.buildTranscript(resolved?.cwd ?? "");
+            if (resolved?.status === "waiting" && this.autoAnswered !== canonical) {
+              this.autoAnswered = canonical; this.inputMode = true; this.input.focused = this.focused;
+            }
           }
           this.metadata = metadata; this.metadataId = canonical;
         }
@@ -119,26 +160,34 @@ export class Dashboard implements Component, Focusable {
 
   private buildTranscript(cwd: string) {
     const components: Component[] = [];
-    const tools = new Map<string, ToolExecutionComponent>();
+    const tools = new Map<string, ToolLine>();
+    const theme = this.theme;
     const cleanContent = (content: Message["content"]) => typeof content === "string" ? terminalText(content) :
       content.map((part) => part.type === "text" ? { ...part, text: terminalText(part.text) } :
         part.type === "thinking" ? { ...part, thinking: terminalText(part.thinking) } : part);
+    const line = (tool: ToolExecutionComponent, name: string, args: Record<string, unknown>) => {
+      const component = new ToolLine(tool, oneLine(toolSummary(name, args)), theme);
+      component.expanded = this.toolsExpanded;
+      tool.setExpanded(true);
+      return component;
+    };
     for (const message of this.messages) {
       if (message.role === "user") {
         const text = typeof message.content === "string" ? message.content :
           message.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("\n");
-        components.push(new UserMessageComponent(terminalText(text), getMarkdownTheme()));
+        const clamp = new Clamp(new UserMessageComponent(terminalText(text), getMarkdownTheme()), theme);
+        clamp.expanded = this.toolsExpanded;
+        components.push(clamp);
       } else if (message.role === "assistant") {
         components.push(new AssistantMessageComponent({ ...message, content: cleanContent(message.content) as typeof message.content }, this.hideThinking));
         for (const part of message.content) if (part.type === "toolCall") {
           const args = Object.fromEntries(Object.entries(part.arguments).map(([key, value]) => [key, typeof value === "string" ? terminalText(value) : value]));
           const factory = toolDefinitions[part.name as keyof typeof toolDefinitions];
-          const tool = new ToolExecutionComponent(part.name, part.id, args, { showImages: false }, factory?.(cwd), this.tui, cwd);
           // This is a replay, not an execution. Do not mark args complete:
           // edit's live preview would otherwise read the current working tree.
-          tool.setExpanded(this.toolsExpanded);
+          const tool = line(new ToolExecutionComponent(part.name, part.id, args, { showImages: false }, factory?.(cwd), this.tui, cwd), part.name, args);
           if (message.stopReason === "aborted" || message.stopReason === "error") {
-            tool.updateResult({ content: [{ type: "text", text: terminalText(message.errorMessage || (message.stopReason === "aborted" ? "Operation aborted" : "Error")) }], isError: true });
+            tool.update({ content: [{ type: "text", text: terminalText(message.errorMessage || (message.stopReason === "aborted" ? "Operation aborted" : "Error")) }], isError: true });
           }
           tools.set(part.id, tool);
           components.push(tool);
@@ -147,14 +196,24 @@ export class Dashboard implements Component, Focusable {
         let tool = tools.get(message.toolCallId);
         if (!tool) {
           // Older-history windows can start with the result of a call outside the window.
-          tool = new ToolExecutionComponent(message.toolName, message.toolCallId, {}, { showImages: false }, undefined, this.tui, cwd);
-          tool.setExpanded(this.toolsExpanded);
+          tool = line(new ToolExecutionComponent(message.toolName, message.toolCallId, {}, { showImages: false }, undefined, this.tui, cwd), message.toolName, {});
           components.push(tool);
         }
-        tool.updateResult({ ...message, content: cleanContent(message.content) as typeof message.content, isError: message.isError ?? false });
+        tool.update({ ...message, content: cleanContent(message.content) as typeof message.content, isError: message.isError ?? false });
       }
     }
     this.transcript = components;
+  }
+
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (event.type !== "wheel" || !event.wheelDelta) return undefined;
+    if (this.detailId) this.offset = Math.max(0, this.offset - event.wheelDelta);
+    else if (this.entries.length) {
+      this.index = Math.max(0, Math.min(this.entries.length - 1, this.index + Math.sign(event.wheelDelta)));
+      this.selectedId = this.entries[this.index]?.id;
+      this.scheduleRefresh();
+    }
+    return { handled: true };
   }
 
   handleInput(data: string) {
@@ -164,25 +223,32 @@ export class Dashboard implements Component, Focusable {
       else this.input.handleInput(data);
       this.tui.requestRender(); return;
     }
+    const confirming = this.confirmCancel;
+    this.confirmCancel = undefined;
     if (matches("tui.select.cancel") || matches("tui.editor.cursorLeft") || data === "h") {
       if (!this.detailId) return this.done(undefined);
-      this.detailId = undefined; this.messages = []; this.transcript = []; this.metadata = undefined; this.historyLimit = 100; this.error = undefined;
+      this.detailId = undefined; this.messages = []; this.transcript = []; this.metadata = undefined; this.historyLimit = 100; this.error = undefined; this.showInfo = false;
     } else if (!this.detailId && (data === "c" || data === "p")) return this.done(data === "c" ? "configure" : "preset");
     else if (data === "x") {
+      // A single stray x must not kill a long-running job.
       const job = this.entries.find((job) => job.id === (this.detailId ?? this.selectedId));
-      if (job && pendingJob(job) && this.jobs) this.perform(() => this.jobs!.cancel(job.id));
+      if (job && pendingJob(job) && this.jobs) {
+        if (confirming === job.id) this.perform(() => this.jobs!.cancel(job.id));
+        else this.confirmCancel = job.id;
+      }
     } else if (this.detailId) {
       if (data === "i" || matches("tui.select.confirm")) { this.inputMode = true; this.input.focused = this.focused; }
+      else if (data === "?") this.showInfo = !this.showInfo;
       else if (data === "k" || matches("tui.select.up")) this.offset += 6;
       else if (data === "j" || matches("tui.select.down")) this.offset = Math.max(0, this.offset - 6);
-      else if (matches("tui.editor.pageUp")) this.offset += this.height();
-      else if (matches("tui.editor.pageDown")) this.offset = Math.max(0, this.offset - this.height());
+      else if (matches("tui.editor.pageUp")) this.offset += this.bodyHeight;
+      else if (matches("tui.editor.pageDown")) this.offset = Math.max(0, this.offset - this.bodyHeight);
       else if (data === "g") this.offset = Number.MAX_SAFE_INTEGER;
       else if (data === "G") this.offset = 0;
       else if (data === "o") { this.historyLimit += 100; this.scheduleRefresh(); }
       else if (matches("app.tools.expand")) {
         this.toolsExpanded = !this.toolsExpanded;
-        for (const component of this.transcript) if (component instanceof ToolExecutionComponent) component.setExpanded(this.toolsExpanded);
+        for (const component of this.transcript) if ("expanded" in component) (component as Expandable).expanded = this.toolsExpanded;
         this.offset = 0;
       } else if (matches("app.thinking.toggle")) {
         this.hideThinking = !this.hideThinking;
@@ -201,7 +267,7 @@ export class Dashboard implements Component, Focusable {
     if (!this.detailId) this.scheduleRefresh();
     this.tui.requestRender();
   }
-  private height() { return Math.max(3, (this.tui.terminal.rows || 30) - (this.inputMode ? 11 : 9)); }
+  private rows() { return Math.max(8, (this.tui.terminal.rows || 30) - 3); }
 
   render(width: number) {
     const theme = this.theme;
@@ -210,59 +276,102 @@ export class Dashboard implements Component, Focusable {
     if (this.error) lines.push(theme.fg("error", terminalText(this.error)));
     return lines.map((line) => truncateToWidth(line, width));
   }
+  private header(job: Job, width: number) {
+    const theme = this.theme;
+    const title = theme.fg(color(job), `${STATUS_ICONS[job.status] ?? "●"} `) + theme.fg("toolTitle", oneLine(job.title ?? job.task));
+    return spread(title, theme.fg(color(job), statusLabel(job)) + theme.fg("dim", ` ${elapsed(job.startedAt, job.finishedAt ?? Date.now())}`), width);
+  }
+  private meta(job: Job) {
+    const usage = this.metadataId === job.id ? usageText(this.metadata) : "";
+    return this.theme.fg("dim", [`${job.name ?? job.agent}`, `${job.model}:${job.thinking}`, usage].filter(Boolean).join(" · "));
+  }
+  private cancelHint(job?: Job) {
+    return job && this.confirmCancel === job.id ? this.theme.fg("warning", `press x again to cancel ${job.name ?? job.agent}`) : undefined;
+  }
   private renderList(width: number) {
-    const theme = this.theme, now = Date.now(), capacity = this.height();
-    const start = Math.max(0, Math.min(this.index - Math.floor(capacity / 2), this.entries.length - capacity));
-    const beginning = Math.min(now, ...this.entries.map((job) => job.startedAt));
-    const end = Math.max(beginning + 1, ...this.entries.map((job) => job.finishedAt ?? now));
-    const wide = width >= 96;
-    const timelineWidth = Math.max(12, Math.min(24, Math.floor(width * 0.18)));
-    const titleWidth = Math.max(12, width - timelineWidth - 47);
-    const lines = [theme.bold(theme.fg("accent", `Subagents · ${this.entries.length} jobs · preset ${getActiveSubagentPresetName()}`)),
-      theme.fg("dim", wide ? `${pad("  AGENT / TASK", titleWidth)} ${pad("STATUS", 10)}START     END       DUR    TIMELINE` : "  AGENT / TASK · STATUS · START → END · DURATION"), theme.fg("border", "─".repeat(width))];
-    for (const [offset, job] of this.entries.slice(start, start + capacity).entries()) {
-      const identity = `${start + offset === this.index ? "❯" : " "} ${theme.fg(color(job), "■")} ${jobTitle(job)}`;
-      const duration = elapsed(job.startedAt, job.finishedAt ?? now);
-      lines.push(wide
-        ? `${pad(identity, titleWidth)} ${pad(theme.fg(color(job), job.status), 10)}${clock(job.startedAt)}  ${clock(job.finishedAt)}  ${pad(duration, 6)} ${theme.fg(color(job), timelineBar(job, beginning, end, timelineWidth))}`
-        : `${start + offset === this.index ? "❯" : " "} ${theme.fg(color(job), job.status)} · ${clock(job.startedAt)} → ${clock(job.finishedAt)} · ${duration} · ${jobTitle(job)}`);
+    const theme = this.theme, capacity = this.rows() - 3;
+    const blocks = this.entries.map((job, index) => {
+      const selected = index === this.index;
+      if (!pendingJob(job)) {
+        const line = `${selected ? theme.fg("accent", "❯") : " "} ${this.header(job, Math.max(1, width - 2))}`;
+        return selected ? [line, `  ${this.meta(job)}`] : [line];
+      }
+      const activity = job.status === "waiting" || job.status === "stalled" || job.error
+        ? [theme.fg(job.status === "waiting" ? "warning" : "muted", jobActivity(job))]
+        : (this.jobs?.preview(job.id) ?? "").split("\n").filter((line) => line.trim()).slice(-2).map((line) => theme.fg("muted", oneLine(line)));
+      const body = { invalidate() {}, render: (inner: number) => [this.header(job, inner), this.meta(job), ...activity].map((line) => truncateToWidth(line, inner)) };
+      return framed(body, theme, selected ? "accent" : "borderMuted").render(width);
+    });
+    const lines: string[] = [];
+    let selectedStart = 0, selectedEnd = 0;
+    for (const [index, block] of blocks.entries()) {
+      if (index === this.index) { selectedStart = lines.length; selectedEnd = lines.length + block.length; }
+      lines.push(...block);
     }
+    let start = Math.max(0, Math.min(selectedStart, lines.length - capacity));
+    if (selectedEnd > start + capacity) start = selectedEnd - capacity;
+    const shown = lines.slice(start, start + capacity);
     if (!this.entries.length) {
-      lines.push("No jobs yet. Agents appear here when you delegate work.", "");
-      for (const [name, agent] of Object.entries(getAgents()).slice(0, Math.max(0, capacity - 2))) lines.push(`${name} · ${agent.model}:${agent.thinking}`);
+      shown.push("No jobs yet. Agents appear here when you delegate work.", "");
+      for (const [name, agent] of Object.entries(getAgents()).slice(0, Math.max(0, capacity - 2))) shown.push(`${name} · ${agent.model}:${agent.thinking}`);
     }
-    const selected = this.entries[this.index];
-    while (lines.length < capacity + 3) lines.push("");
-    if (selected) lines.push(theme.fg("dim", `${jobSummary(selected, this.metadataId === selected.id ? this.metadata : undefined)} · ${selected.name ?? selected.id}`), theme.fg("muted", jobActivity(selected, this.jobs?.preview(selected.id))));
-    lines.push(theme.fg("dim", "j/k select · enter/l inspect · x abort · c configure · p preset · esc close"));
-    return lines;
+    while (shown.length < capacity) shown.push("");
+    const counts = ["waiting", "running", "stalled", "done", "failed", "cancelled"].flatMap((status) => {
+      const count = this.entries.filter((job) => job.status === status).length;
+      return count ? [`${STATUS_ICONS[status]} ${count}`] : [];
+    }).join("  ");
+    const footer = this.cancelHint(this.entries[this.index]) ??
+      theme.fg("dim", `j/k select · enter open${pendingJob(this.entries[this.index] ?? { status: "done" } as Job) ? " · x cancel" : ""} · c configure · p preset · esc close`);
+    return [spread(theme.bold(theme.fg("accent", "Subagents")) + theme.fg("dim", ` · preset ${getActiveSubagentPresetName()}`), theme.fg("dim", counts), width), "", ...shown, footer];
   }
   private renderDetail(job: Job, width: number) {
-    const theme = this.theme, body = this.transcript.flatMap((component) => component.render(width));
-    const wrap = (text: string, color: Parameters<Theme["fg"]>[0]) =>
-      wrapTextWithAnsi(text, Math.max(1, width)).map((line) => theme.fg(color, line));
+    const theme = this.theme;
+    if (width < 12) return [truncateToWidth(this.header(job, width), width)];
+    const inner = width - 4;
+    const edge = (text: string) => theme.fg("borderMuted", text);
+    const row = (line: string) => edge("│") + " " + pad(line, inner) + " " + edge("│");
+    // A border with labels set into it, like ╭─ title ───── status ─╮.
+    const rule = (left: string, right: string, title = "", tail = "") => {
+      const room = width - 2;
+      const label = title ? truncateToWidth(` ${title} `, Math.max(0, room - 2)) : "";
+      const end = tail && visibleWidth(label) + visibleWidth(tail) + 4 <= room ? ` ${tail} ` : "";
+      const fill = Math.max(0, room - 1 - visibleWidth(label) - visibleWidth(end) - (end ? 1 : 0));
+      return edge(left + "─") + label + edge("─".repeat(fill)) + end + (end ? edge("─") : "") + edge(right);
+    };
+    const wrap = (text: string, tone: Parameters<Theme["fg"]>[0]) => wrapTextWithAnsi(theme.fg(tone, text), Math.max(1, inner));
+
+    const top = [rule("╭", "╮", theme.fg("accent", "‹ ") + theme.fg("toolTitle", oneLine(job.title ?? job.task)),
+      theme.fg(color(job), `${STATUS_ICONS[job.status] ?? "●"} ${statusLabel(job)}`) + theme.fg("dim", ` ${elapsed(job.startedAt, job.finishedAt ?? Date.now())}`)), row(this.meta(job))];
+    if (this.showInfo) top.push(...[
+      `${job.name ?? job.id} · started ${clock(job.startedAt)} · ended ${clock(job.finishedAt)} · ${shortPaths(job.cwd)}`,
+      `Conversation ${job.conversationId} · latest ${this.historyLimit} entries · o older`,
+      "j/k or wheel scroll · g/G top/bottom · ctrl+o tools · ctrl+t thinking · i message",
+    ].flatMap((line) => wrap(line, "dim")).map(row));
+
+    // Pinned below the transcript so the current state stays visible while scrolling.
+    const pinned: string[] = [];
     // The transcript already contains partial assistant text. Show only the
     // current tool/retry state here, not a second copy of the streamed answer.
     const activity = jobActivity(job, this.jobs?.preview(job.id));
-    if (activeJob(job) && (!this.messages.length || /^(Running |Retrying:|Compacting context|Waiting for model|Stalled)/.test(activity))) body.push(...wrap(activity, "muted"));
+    if (activeJob(job) && (!this.messages.length || /^(Running |Retrying:|Compacting context|Waiting for model|Stalled)/.test(activity))) pinned.push(...wrap(`● Now · ${oneLine(activity)}`, "muted"));
     for (const item of this.metadata?.queued ?? []) if (item.mode !== "write") {
       const content = typeof item.content === "string" ? item.content : JSON.stringify(item.content);
-      body.push(...wrap(`Guidance queued · ${terminalText(content)}`, "warning"));
+      pinned.push(...wrap(`Queued · ${oneLine(content)}`, "warning"));
     }
-    if (job.question) body.push(...wrapTextWithAnsi(theme.fg("warning", `Question for parent · ${terminalText(job.question.text)}`), Math.max(1, width)));
-    if (job.error) body.push(...wrap(terminalText(job.error), "error"));
-    const height = this.height();
+    if (job.question) pinned.push(...wrap(`? ${terminalText(job.question.text)}`, "warning"));
+    if (job.error) pinned.push(...wrap(terminalText(job.error), "error"));
+    if (this.inputMode) pinned.push(theme.fg("accent", job.status === "waiting" ? "Answer the child's question" : "Send guidance or follow-up"), ...this.input.render(inner));
+    else pinned.push(theme.fg("dim", `› i to ${job.status === "waiting" ? "answer" : pendingJob(job) ? "steer" : "follow up"}`));
+
+    const body = this.transcript.flatMap((component) => component.render(inner));
+    const height = this.bodyHeight = Math.max(3, this.rows() - top.length - pinned.length - 3);
     this.offset = Math.min(this.offset, Math.max(0, body.length - height));
     const end = body.length - this.offset;
     const shown = body.slice(Math.max(0, end - height), end);
     while (shown.length < height) shown.push("");
-    return [theme.bold(theme.fg("accent", `‹ Subagents / ${jobTitle(job)}`)),
-      `${theme.fg(color(job), job.status)} · ${jobSummary(job, this.metadata)}`,
-      theme.fg("dim", `${job.name ?? job.id} · started ${clock(job.startedAt)} · ended ${clock(job.finishedAt)} · ${job.cwd}`),
-      theme.fg("dim", `Conversation ${job.conversationId} · latest ${this.historyLimit} entries${this.offset ? ` · ${this.offset} lines below` : ""}`),
-      theme.fg("border", "─".repeat(width)), ...shown,
-      ...(this.inputMode ? [theme.fg("accent", job.status === "waiting" ? "Answer the child's question" : "Send guidance or follow-up"), ...this.input.render(width)] : []),
-      theme.fg("dim", this.inputMode ? "enter send · esc cancel" : `ctrl+o expand · ctrl+t thinking · i ${job.status === "waiting" ? "answer" : "message"} · esc back · j/k scroll · g/G top/bottom · o older${pendingJob(job) ? " · x abort" : ""}`)];
+    const below = this.offset ? theme.fg("accent", `↓ ${this.offset} lines below · G follow`) : "";
+    const keys = this.cancelHint(job) ?? theme.fg("dim", this.inputMode ? "enter send · esc cancel" : `ctrl+o tools · ? more${pendingJob(job) ? " · x cancel" : ""} · esc back`);
+    return [...top, rule("├", "┤"), ...shown.map(row), rule("├", "┤", "", below), ...pinned.map(row), rule("╰", "╯", keys)];
   }
 }
 

@@ -64,7 +64,19 @@ export default function askUser(pi: ExtensionAPI) {
       { label: "Write my own answer…", isOther: true },
     ];
 
-    return ctx.ui.custom<SelectionResult>((tui, theme, _kb, done) => {
+    let restoreStatus: (() => void) | undefined;
+    const showQuestion = () => ctx.ui.custom<SelectionResult>((tui, theme, _kb, done) => {
+      // Pi 1.3 reports native dialogs, but custom components must report their own status.
+      const terminal = tui.terminal as typeof tui.terminal & {
+        setProgramStatus?: (status: {
+          state: "blocked" | "working" | "idle";
+          app: string;
+          kind?: "question";
+          message?: string;
+        }) => void;
+      };
+      restoreStatus = () => terminal.setProgramStatus?.({ state: ctx.isIdle() ? "idle" : "working", app: "pi" });
+      terminal.setProgramStatus?.({ state: "blocked", kind: "question", app: "pi", message: params.question });
       let optionIndex = 0;
       let editMode = false;
       let settled = false;
@@ -179,6 +191,16 @@ export default function askUser(pi: ExtensionAPI) {
         dispose() { signal?.removeEventListener("abort", cancel); },
       };
     });
+    pi.events.emit("herdr:blocked", { active: true, label: params.question });
+    try {
+      return await showQuestion();
+    } finally {
+      try {
+        restoreStatus?.();
+      } finally {
+        pi.events.emit("herdr:blocked", { active: false });
+      }
+    }
   };
 
   const resumeQuestion = async (question: AskUserQuestion, ctx: ExtensionContext) => {
