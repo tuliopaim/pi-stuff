@@ -144,7 +144,8 @@ test("run, repeated waits and completion reports update one native job card", as
   assert.deepEqual(renderers.get("agent-question")(sent[0].message, {}, plainTheme).render(160), []);
   job.status = "running"; job.requestId = "answer-request"; job.delivered = false; output = "Checking the chosen tests";
   listener(); await new Promise((resolve) => setTimeout(resolve, 150));
-  assert.match(terminalText(run.render(160).join("\n")), /Checking the chosen tests/);
+  assert.match(terminalText(run.render(160).join("\n")), /Started agent ui-demo/);
+  assert.doesNotMatch(terminalText(run.render(160).join("\n")), /Checking the chosen tests/);
   job.status = "done"; output = "Demo complete";
   listener(); await new Promise((resolve) => setTimeout(resolve, 150));
   const rendered = terminalText(run.render(160).join("\n"));
@@ -214,7 +215,8 @@ test("aborting a recovered job's native wait does not hide its later question or
   const wait = new ToolExecutionComponent("agent", "wait-call", { action: "wait", id: job.name }, {}, tools.get("agent"), { requestRender() {} } as any, process.cwd());
   wait.updateResult({ content: [{ type: "text", text: output }], details: result(), isError: false }, true);
   wait.updateResult({ content: [{ type: "text", text: "Operation aborted" }], isError: true });
-  assert.match(terminalText(wait.render(160).join("\n")), /worker-1.*Running/);
+  assert.match(terminalText(wait.render(160).join("\n")), /Started agent worker-1/);
+  assert.doesNotMatch(terminalText(wait.render(160).join("\n")), /Running tests/);
   job.status = "waiting"; output = "Which tests?";
   listener(); await new Promise((resolve) => setTimeout(resolve, 150));
   assert.match(terminalText(wait.render(160).join("\n")), /Which tests\?/);
@@ -257,6 +259,60 @@ test("all background agent types share live cards and one footer status", async 
   assert.doesNotMatch(rendered, /\$0\.0300/);
   assert.doesNotMatch(rendered, /Stale output|ctrl\+o/);
   assert.ok(widgets.every(({ name }) => name !== "commit-background"));
+});
+
+for (const terminal of ["done", "failed", "cancelled"] as const) test(`background transcript stays compact until ${terminal} while its monitor shows progress`, async (t) => {
+  let listener!: () => void;
+  const job: any = { id: "worker-id", name: "worker-1", requestId: "request", agent: "default", status: "running",
+    background: true, delivered: true, model: "custom/worker", thinking: "high", title: "Test suite", task: "Run the tests", startedAt: Date.now() };
+  const output = "Running tests";
+  const manager = {
+    list: async () => [job], preview: () => output, resume: async () => {}, close: async () => {},
+    subscribe: (fn: () => void) => { listener = fn; return () => {}; },
+    result: async () => ({ job: { ...job }, output, usage: { cost: { total: 0 } } }),
+  };
+  const { tools, events, persisted } = harness(t, async () => manager);
+  const widgets: any[] = [];
+  const ctx = {
+    hasUI: true, modelRegistry: { find: () => {}, streamSimple: () => {} },
+    sessionManager: { getSessionId: () => "session", getSessionFile: () => undefined, getBranch: () => persisted },
+    ui: { theme: plainTheme, setStatus() {},
+      setWidget: (name: string, content: any) => widgets.push({ name, content }), notify() {} },
+  };
+  t.after(() => events.get("session_shutdown")({}, ctx));
+  await events.get("session_start")({}, ctx);
+  const tool = tools.get("agent");
+  const card = new ToolExecutionComponent("agent", "card-call", { background: true, task: job.task }, {}, tool, { requestRender() {} } as any, process.cwd());
+  const started = { content: [{ type: "text", text: output }], details: { job: { ...job }, output }, isError: false };
+  card.updateResult(started);
+  persisted.push({ type: "message", message: { role: "toolResult", toolCallId: "card-call", ...started } });
+  for (const status of ["running", "stalled"]) {
+    job.status = status;
+    listener(); await new Promise((resolve) => setTimeout(resolve, 150));
+    const receipt = terminalText(card.render(160).join("\n"));
+    assert.match(receipt, /Started agent worker-1 · Test suite/);
+    assert.match(receipt, /\/agents worker-1/);
+    assert.doesNotMatch(receipt, /Running tests|custom\/worker|Running|Stalled/);
+    assert.equal(card.render(160).filter((line: string) => terminalText(line).trim()).length, 2);
+    for (const width of [20, 40]) assert.ok(card.render(width).every((line: string) => visibleWidth(line) <= width));
+    const monitor = widgets.at(-1);
+    assert.equal(monitor.name, "subagents-monitor");
+    assert.match(widgetContent(monitor.content).join("\n"), /worker-1 · custom\/worker:high/);
+    assert.match(widgetContent(monitor.content).join("\n"), /Running tests/);
+    const expanded = tool.renderResult(started, { expanded: true, isPartial: false }, plainTheme, { toolCallId: "card-call" });
+    assert.match(terminalText(expanded.render(160).join("\n")), /Running tests/);
+    assert.match(terminalText(expanded.render(160).join("\n")), /Task:[\s\S]*Run the tests/);
+    await events.get("session_compact")({}, ctx);
+    assert.match(terminalText(card.render(160).join("\n")), /Started agent worker-1/);
+  }
+  job.status = terminal;
+  listener(); await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(widgets.at(-1).content, undefined);
+  const completed = terminalText(card.render(160).join("\n"));
+  assert.match(completed, new RegExp(terminal === "done" ? "Completed" : terminal === "failed" ? "Failed" : "Cancelled"));
+  assert.match(completed, /Running tests/);
+  assert.match(completed, /worker-1 · custom\/worker:high/);
+  assert.doesNotMatch(completed, /Started agent/);
 });
 
 test("delegated workflow children never register orchestration tools", (t) => {
@@ -711,6 +767,9 @@ test("a foreground wait hides its background card and restores it on abort", asy
   await events.get("session_start")({}, ctx);
   t.after(() => events.get("session_shutdown")({}, ctx));
   assert.match(JSON.stringify([...widgets.values()]), /Running tests/);
+  const card = new ToolExecutionComponent("agent", "run-call", { background: true, task: job.task }, {}, tools.get("agent"), { requestRender() {} } as any, process.cwd());
+  card.updateResult({ content: [{ type: "text", text: result.output }], details: result, isError: false });
+  assert.match(terminalText(card.render(160).join("\n")), /Started agent default-1/);
   const controller = new AbortController();
   let update: any;
   const waiting = tools.get("agent").execute("wait", { action: "wait", id: job.name }, controller.signal, (next: any) => { update = next; }, ctx);
@@ -722,6 +781,8 @@ test("a foreground wait hides its background card and restores it on abort", asy
   t.after(() => other.abort(new Error("cancel wait")));
   await new Promise((resolve) => setTimeout(resolve, 150));
   assert.equal(update.details.job.id, job.id);
+  assert.match(terminalText(card.render(160).join("\n")), /Running tests/);
+  assert.doesNotMatch(terminalText(card.render(160).join("\n")), /Started agent/);
   assert.ok([...widgets.values()].every((content) => content === undefined), "the same job must not appear in the wait card and widget");
   controller.abort(new Error("cancel wait"));
   await rejected;
@@ -731,6 +792,8 @@ test("a foreground wait hides its background card and restores it on abort", asy
   await secondRejected;
   await new Promise((resolve) => setTimeout(resolve, 150));
   assert.match(JSON.stringify([...widgets.values()]), /Running tests/);
+  assert.match(terminalText(card.render(160).join("\n")), /Started agent default-1/);
+  assert.doesNotMatch(terminalText(card.render(160).join("\n")), /Running tests/);
   assert.equal(listeners.size, 1);
   await events.get("session_shutdown")({}, ctx);
   assert.ok([...widgets.values()].every((content) => content === undefined), "shutdown clears background cards");
@@ -835,3 +898,49 @@ test("explicit background collection counts once, survives reload, and ignores a
   assert.equal((await tool.execute("repeat", { action: "wait", id: job.id }, undefined, undefined, ctx)).usage, undefined);
   await events.get("session_shutdown")({}, ctx);
 });
+
+for (const mode of ["tui", "rpc", "json", "print"]) {
+  test(`Herdr activity aggregates recovered foreground and background jobs (${mode})`, async (t) => {
+    const entries = [false, true].map((background, index) => ({
+      id: `job-${index}`, requestId: `request-${index}`, agent: "default", status: "done",
+      background, delivered: true,
+    }));
+    let listener!: () => void;
+    const manager = {
+      list: async () => entries,
+      subscribe: (fn: () => void) => { listener = fn; return () => {}; },
+      resume: async () => { entries[0].status = "running"; entries[1].status = "stalled"; },
+      close: async () => {},
+      result: async (id: string) => ({ job: entries.find((job) => job.id === id), output: "Working" }),
+      preview: () => "Working",
+    };
+    const { events, bus, persisted } = harness(t, async () => manager);
+    const activity: unknown[] = [];
+    bus.on("herdr:activity", (data) => activity.push(data));
+    const ctx = {
+      mode, hasUI: mode === "tui" || mode === "rpc", modelRegistry: { find() {}, streamSimple() {} },
+      sessionManager: { getSessionId: () => "session", getSessionFile: () => undefined, getBranch: () => persisted },
+      ui: { theme: plainTheme, setStatus() {}, setWidget() {}, notify() {} },
+    };
+    const expected = (active: boolean) => ({ source: "subagents", active });
+    const tick = async () => { listener(); await new Promise((resolve) => setTimeout(resolve, 150)); };
+    await events.get("session_start")({}, ctx);
+    t.after(() => events.get("session_shutdown")({}, ctx));
+    assert.deepEqual(activity, mode === "tui" ? [expected(true)] : []);
+    await tick(); // Duplicate snapshots do not increment any count.
+    entries[0].status = "done";
+    await tick(); // The stalled background job still counts as active.
+    assert.deepEqual(activity, mode === "tui" ? [expected(true)] : []);
+    for (const status of ["waiting", "done", "failed", "cancelled"]) {
+      entries[1].status = status;
+      await tick();
+    }
+    assert.deepEqual(activity, mode === "tui" ? [expected(true), expected(false)] : []);
+    entries[0].status = "running";
+    await tick();
+    await events.get("session_shutdown")({}, ctx);
+    await events.get("session_shutdown")({}, ctx);
+    assert.deepEqual(activity, mode === "tui"
+      ? [expected(true), expected(false), expected(true), expected(false)] : []);
+  });
+}
