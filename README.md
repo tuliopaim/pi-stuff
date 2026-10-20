@@ -86,7 +86,7 @@ Foreground calls wait for an answer or a question. Every child has `ask_question
 
 Background calls return a job name and UUID and report results and questions to the parent automatically. Management actions accept either identifier. Names are unique lowercase handles; optional `name` and `title` fields make important jobs easier to find.
 
-`/agents` opens the live dashboard, newest jobs first, with status, start/end times, duration, and timelines. Use `j/k` to select, Enter to inspect the transcript, `i` to send guidance or answer a question, and `x` to abort, including waiting jobs. The inspector shows usage, cost, context occupancy, conversation ID, and queued guidance. Press `o` to load another 100 history entries. `c` opens configuration and `p` switches presets. `/agents <job-name-or-id>` opens a job directly. RPC clients retain native dialogs. Each job has one live card with its model, status, usage, and latest activity. Waits, questions, answers, and completion reports update that card rather than add blocks. The underlying tool calls and results stay in the model's transcript. Cards rebuild from the visible transcript after reloads or compaction. Recovered background jobs without a transcript card appear above the editor. `/commit` uses the same renderer with an Escape-to-cancel control.
+`/agents` opens the live dashboard, newest jobs first, with status, start/end times, duration, and timelines. Use `j/k` to select, Enter to inspect the transcript, `i` to send guidance or answer a question, and `x` to abort, including waiting jobs. The inspector shows usage, cost, context occupancy, conversation ID, and queued guidance. Press `o` to load another 100 history entries. `c` opens configuration and `p` switches presets. `/agents <job-name-or-id>` opens a job directly. RPC clients retain native dialogs. Active background jobs show a compact "Started agent" receipt in the transcript and live progress only in the pinned bottom monitor. Expand the receipt to inspect details. Foreground jobs and waits keep a live transcript card. Questions and terminal results restore the full card in the original entry rather than add blocks. The underlying tool calls and results stay in the model's transcript. Cards rebuild from the visible transcript after reloads or compaction. Recovered background jobs without a transcript card appear above the editor. `/commit` uses the same renderer with an Escape-to-cancel control.
 
 There can be four running jobs per parent session and one mutating child per working tree. Shell access counts as mutating unless the agent sets `"mutating": false`, as `review` and `plan` do. Do not edit the same working tree while a mutating child owns it. Independent mutating work belongs in separate worktrees. Foreground cancellation stops its job; cancelling a wait for a background job leaves that job running. User cancellations update the card without restarting the parent. Questions, failures, and timeouts still wake it.
 
@@ -117,6 +117,17 @@ Sessions, provider credentials, and subagent state stay separate from normal
 Pi. OptMem deliberately remains shared, so work notes can appear in personal
 sessions. Existing machine-wide EMS/Jira skills remain available as before;
 `work-services` and `health-scout` load only in this work profile and Claude work.
+
+Herdr's integration is installed per profile, not through the shared extensions.
+After creating the work profile, install it separately:
+
+```sh
+PI_CODING_AGENT_DIR="$HOME/.pi-work/agent" herdr integration install pi
+```
+
+Start a new `piw` session or run `/reload` in an existing one afterward. The
+integration supplies native session identity and restore support. OSC 7501
+status reporting is built into Pi 1.3 and requires a supporting Herdr build.
 
 PostgreSQL uses the existing `~/.claude-work/bin/postgres-mcp` launcher and
 Keychain-backed read-only profiles. Tools load through search; modification,
