@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+	getWebToolsSettings,
 	parseEnumSetting,
 	parseIntegerSetting,
 	parseOnOff,
@@ -24,4 +25,8 @@ test("parseEnumSetting validates allowed values", () => {
 	assert.equal(parseEnumSetting("markdown", ["markdown", "text", "html"], "text"), "markdown");
 	assert.equal(parseEnumSetting("pdf", ["markdown", "text", "html"], "text"), "text");
 	assert.equal(parseEnumSetting(undefined, ["markdown", "text", "html"], "text"), "text");
+});
+
+test("default search endpoint is the public Exa MCP host used by opencode", () => {
+	assert.equal(getWebToolsSettings().search.endpoint, "https://mcp.exa.ai/mcp");
 });

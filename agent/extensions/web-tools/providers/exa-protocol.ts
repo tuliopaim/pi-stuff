@@ -2,7 +2,7 @@ import { err, ok, type Result } from "../result.ts";
 import type { SearchDepth } from "../types.ts";
 import type { SearchProviderRequest } from "./types.ts";
 
-const DEFAULT_CONTEXT_MAX_CHARACTERS = 2_000;
+const DEFAULT_CONTEXT_MAX_CHARACTERS = 10_000;
 
 export type ExaDepth = "auto" | "fast";
 
