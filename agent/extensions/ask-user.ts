@@ -52,7 +52,32 @@ type SelectionResult = { answer: string; wasCustom: boolean; index?: number } | 
 type DisplayOption = { label: string; description?: string; isOther?: boolean };
 
 export default function askUser(pi: ExtensionAPI) {
-  const presentQuestion = async (
+  const presentRpcQuestion = async (
+    params: Pick<AskUserQuestion, "question" | "options">,
+    ctx: ExtensionContext,
+    signal?: AbortSignal,
+  ): Promise<SelectionResult> => {
+    const choices = params.options.map((option, index) =>
+      `${index + 1}. ${option.label}${option.description ? ` — ${option.description}` : ""}`
+    );
+    choices.push(`${params.options.length + 1}. Write my own answer…`);
+
+    const selected = await ctx.ui.select(params.question, choices, { signal });
+    if (signal?.aborted || selected === undefined) return null;
+
+    // Match the exact choice string. Choice numbers make every value unique, so duplicate
+    // labels or a provided label that looks free-form cannot select the wrong answer.
+    const index = choices.indexOf(selected);
+    if (index < 0) return null;
+    if (index === params.options.length) {
+      const answer = (await ctx.ui.input(params.question, "Type your own answer", { signal }))?.trim();
+      if (signal?.aborted || !answer) return null;
+      return { answer, wasCustom: true };
+    }
+    return { answer: params.options[index]!.label, wasCustom: false, index: index + 1 };
+  };
+
+  const presentTuiQuestion = async (
     params: Pick<AskUserQuestion, "question" | "options">,
     ctx: ExtensionContext,
     signal?: AbortSignal,
@@ -203,6 +228,16 @@ export default function askUser(pi: ExtensionAPI) {
     }
   };
 
+  const presentQuestion = async (
+    params: Pick<AskUserQuestion, "question" | "options">,
+    ctx: ExtensionContext,
+    signal?: AbortSignal,
+  ): Promise<SelectionResult> => {
+    if (signal?.aborted) return null;
+    if (ctx.mode === "rpc") return presentRpcQuestion(params, ctx, signal);
+    return presentTuiQuestion(params, ctx, signal);
+  };
+
   const resumeQuestion = async (question: AskUserQuestion, ctx: ExtensionContext) => {
     const result = await presentQuestion(question, ctx);
     if (!result) return;
@@ -218,8 +253,8 @@ export default function askUser(pi: ExtensionAPI) {
   pi.registerCommand("reask", {
     description: "Replay the most recent ask_user question",
     handler: async (_args, ctx) => {
-      if (ctx.mode !== "tui") {
-        ctx.ui.notify("The ask_user dialog is only available in the TUI.", "warning");
+      if (ctx.mode !== "tui" && ctx.mode !== "rpc") {
+        ctx.ui.notify("The ask_user dialog needs an interactive UI.", "warning");
         return;
       }
       const question = findLatestAskUserQuestion(ctx.sessionManager.getBranch());
@@ -255,7 +290,7 @@ export default function askUser(pi: ExtensionAPI) {
       if (params.options.length < MIN_OPTIONS || params.options.length > MAX_OPTIONS) {
         throw new Error(`ask_user requires ${MIN_OPTIONS}-${MAX_OPTIONS} options.`);
       }
-      if (ctx.mode !== "tui") return reply(buildAskUserResultMessage({ kind: "no-ui" }));
+      if (ctx.mode !== "tui" && ctx.mode !== "rpc") return reply(buildAskUserResultMessage({ kind: "no-ui" }));
       if (signal?.aborted) return reply(buildAskUserResultMessage({ kind: "cancelled" }));
 
       const result = await presentQuestion(params, ctx, signal);
