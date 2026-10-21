@@ -47,20 +47,6 @@ class ToolLine implements Expandable {
   }
 }
 
-// Task prompts can be pages long; show their opening until expanded.
-class Clamp implements Expandable {
-  expanded = false;
-  private child: Component;
-  private theme: Theme;
-  private max: number;
-  constructor(child: Component, theme: Theme, max = 4) { this.child = child; this.theme = theme; this.max = max; }
-  invalidate() { this.child.invalidate(); }
-  render(width: number) {
-    const lines = this.child.render(width);
-    return this.expanded || lines.length <= this.max + 1 ? lines : [...lines.slice(0, this.max), this.theme.fg("dim", truncateToWidth(`  … ${lines.length - this.max} more lines · ctrl+o`, width))];
-  }
-}
-
 export class Dashboard implements Component, Focusable {
   private entries: Job[] = [];
   private selectedId?: string;
@@ -73,6 +59,8 @@ export class Dashboard implements Component, Focusable {
   private historyLimit = 100;
   private offset = 0;
   private toolsExpanded = false;
+  private showPrompt = false;
+  private promptOffset = 0;
   private hideThinking = true;
   private showInfo = false;
   private confirmCancel?: string;
@@ -175,9 +163,7 @@ export class Dashboard implements Component, Focusable {
       if (message.role === "user") {
         const text = typeof message.content === "string" ? message.content :
           message.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("\n");
-        const clamp = new Clamp(new UserMessageComponent(terminalText(text), getMarkdownTheme()), theme);
-        clamp.expanded = this.toolsExpanded;
-        components.push(clamp);
+        components.push(new UserMessageComponent(terminalText(text), getMarkdownTheme()));
       } else if (message.role === "assistant") {
         components.push(new AssistantMessageComponent({ ...message, content: cleanContent(message.content) as typeof message.content }, this.hideThinking));
         for (const part of message.content) if (part.type === "toolCall") {
@@ -205,9 +191,14 @@ export class Dashboard implements Component, Focusable {
     this.transcript = components;
   }
 
+  private scroll(amount: number) {
+    if (this.showPrompt) this.promptOffset = Math.max(0, this.promptOffset - amount);
+    else this.offset = Math.max(0, this.offset + amount);
+  }
+
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (event.type !== "wheel" || !event.wheelDelta) return undefined;
-    if (this.detailId) this.offset = Math.max(0, this.offset - event.wheelDelta);
+    if (this.detailId) this.scroll(-event.wheelDelta);
     else if (this.entries.length) {
       this.index = Math.max(0, Math.min(this.entries.length - 1, this.index + Math.sign(event.wheelDelta)));
       this.selectedId = this.entries[this.index]?.id;
@@ -227,7 +218,7 @@ export class Dashboard implements Component, Focusable {
     this.confirmCancel = undefined;
     if (matches("tui.select.cancel") || matches("tui.editor.cursorLeft") || data === "h") {
       if (!this.detailId) return this.done(undefined);
-      this.detailId = undefined; this.messages = []; this.transcript = []; this.metadata = undefined; this.historyLimit = 100; this.error = undefined; this.showInfo = false;
+      this.detailId = undefined; this.messages = []; this.transcript = []; this.metadata = undefined; this.historyLimit = 100; this.error = undefined; this.showInfo = false; this.showPrompt = false;
     } else if (!this.detailId && (data === "c" || data === "p")) return this.done(data === "c" ? "configure" : "preset");
     else if (data === "x") {
       // A single stray x must not kill a long-running job.
@@ -238,13 +229,14 @@ export class Dashboard implements Component, Focusable {
       }
     } else if (this.detailId) {
       if (data === "i" || matches("tui.select.confirm")) { this.inputMode = true; this.input.focused = this.focused; }
+      else if (data === "p") { this.showPrompt = !this.showPrompt; this.promptOffset = 0; }
       else if (data === "?") this.showInfo = !this.showInfo;
-      else if (data === "k" || matches("tui.select.up")) this.offset += 6;
-      else if (data === "j" || matches("tui.select.down")) this.offset = Math.max(0, this.offset - 6);
-      else if (matches("tui.editor.pageUp")) this.offset += this.bodyHeight;
-      else if (matches("tui.editor.pageDown")) this.offset = Math.max(0, this.offset - this.bodyHeight);
-      else if (data === "g") this.offset = Number.MAX_SAFE_INTEGER;
-      else if (data === "G") this.offset = 0;
+      else if (data === "k" || matches("tui.select.up")) this.scroll(6);
+      else if (data === "j" || matches("tui.select.down")) this.scroll(-6);
+      else if (matches("tui.editor.pageUp")) this.scroll(this.bodyHeight);
+      else if (matches("tui.editor.pageDown")) this.scroll(-this.bodyHeight);
+      else if (data === "g") { if (this.showPrompt) this.promptOffset = 0; else this.offset = Number.MAX_SAFE_INTEGER; }
+      else if (data === "G") { if (this.showPrompt) this.promptOffset = Number.MAX_SAFE_INTEGER; else this.offset = 0; }
       else if (data === "o") { this.historyLimit += 100; this.scheduleRefresh(); }
       else if (matches("app.tools.expand")) {
         this.toolsExpanded = !this.toolsExpanded;
@@ -267,14 +259,18 @@ export class Dashboard implements Component, Focusable {
     if (!this.detailId) this.scheduleRefresh();
     this.tui.requestRender();
   }
-  private rows() { return Math.max(8, (this.tui.terminal.rows || 30) - 3); }
+  private rows() { return Math.max(1, this.tui.terminal.rows || 30); }
 
   render(width: number) {
     const theme = this.theme;
     const job = this.entries.find((job) => job.id === this.detailId);
     const lines = job ? this.renderDetail(job, width) : this.renderList(width);
-    if (this.error) lines.push(theme.fg("error", terminalText(this.error)));
-    return lines.map((line) => truncateToWidth(line, width));
+    if (this.error) lines[lines.length - 1] = theme.fg("error", terminalText(this.error));
+    // Overlay maxHeight only clips; it does not fill uncovered parent rows.
+    const shown = lines.slice(0, this.rows());
+    if (lines.length > this.rows()) shown[shown.length - 1] = lines[lines.length - 1];
+    while (shown.length < this.rows()) shown.push("");
+    return shown.map((line) => pad(line, width));
   }
   private header(job: Job, width: number) {
     const theme = this.theme;
@@ -289,7 +285,7 @@ export class Dashboard implements Component, Focusable {
     return job && this.confirmCancel === job.id ? this.theme.fg("warning", `press x again to cancel ${job.name ?? job.agent}`) : undefined;
   }
   private renderList(width: number) {
-    const theme = this.theme, capacity = this.rows() - 3;
+    const theme = this.theme, capacity = Math.max(0, this.rows() - 3);
     const blocks = this.entries.map((job, index) => {
       const selected = index === this.index;
       if (!pendingJob(job)) {
@@ -341,11 +337,11 @@ export class Dashboard implements Component, Focusable {
     const wrap = (text: string, tone: Parameters<Theme["fg"]>[0]) => wrapTextWithAnsi(theme.fg(tone, text), Math.max(1, inner));
 
     const top = [rule("╭", "╮", theme.fg("accent", "‹ ") + theme.fg("toolTitle", oneLine(job.title ?? job.task)),
-      theme.fg(color(job), `${STATUS_ICONS[job.status] ?? "●"} ${statusLabel(job)}`) + theme.fg("dim", ` ${elapsed(job.startedAt, job.finishedAt ?? Date.now())}`)), row(this.meta(job))];
+      theme.fg(color(job), `${STATUS_ICONS[job.status] ?? "●"} ${statusLabel(job)}`) + theme.fg("dim", ` ${elapsed(job.startedAt, job.finishedAt ?? Date.now())}`)), row(this.showPrompt ? theme.fg("accent", "Initial prompt · p transcript") : this.meta(job))];
     if (this.showInfo) top.push(...[
       `${job.name ?? job.id} · started ${clock(job.startedAt)} · ended ${clock(job.finishedAt)} · ${shortPaths(job.cwd)}`,
       `Conversation ${job.conversationId} · latest ${this.historyLimit} entries · o older`,
-      "j/k or wheel scroll · g/G top/bottom · ctrl+o tools · ctrl+t thinking · i message",
+      "j/k or wheel scroll · g/G top/bottom · p prompt · ctrl+o tools · ctrl+t thinking · i message",
     ].flatMap((line) => wrap(line, "dim")).map(row));
 
     // Pinned below the transcript so the current state stays visible while scrolling.
@@ -363,14 +359,18 @@ export class Dashboard implements Component, Focusable {
     if (this.inputMode) pinned.push(theme.fg("accent", job.status === "waiting" ? "Answer the child's question" : "Send guidance or follow-up"), ...this.input.render(inner));
     else pinned.push(theme.fg("dim", `› i to ${job.status === "waiting" ? "answer" : pendingJob(job) ? "steer" : "follow up"}`));
 
-    const body = this.transcript.flatMap((component) => component.render(inner));
-    const height = this.bodyHeight = Math.max(3, this.rows() - top.length - pinned.length - 3);
-    this.offset = Math.min(this.offset, Math.max(0, body.length - height));
-    const end = body.length - this.offset;
-    const shown = body.slice(Math.max(0, end - height), end);
+    const body = this.showPrompt
+      ? wrapTextWithAnsi(terminalText(job.task).replace(/\t/g, "   "), inner)
+      : this.transcript.flatMap((component) => component.render(inner));
+    const height = this.bodyHeight = Math.max(0, this.rows() - top.length - pinned.length - 3);
+    if (this.showPrompt) this.promptOffset = Math.min(this.promptOffset, Math.max(0, body.length - height));
+    else this.offset = Math.min(this.offset, Math.max(0, body.length - height));
+    const end = this.showPrompt ? Math.min(body.length, this.promptOffset + height) : body.length - this.offset;
+    const shown = body.slice(this.showPrompt ? this.promptOffset : Math.max(0, end - height), end);
     while (shown.length < height) shown.push("");
-    const below = this.offset ? theme.fg("accent", `↓ ${this.offset} lines below · G follow`) : "";
-    const keys = this.cancelHint(job) ?? theme.fg("dim", this.inputMode ? "enter send · esc cancel" : `ctrl+o tools · ? more${pendingJob(job) ? " · x cancel" : ""} · esc back`);
+    const remaining = this.showPrompt ? body.length - end : this.offset;
+    const below = remaining ? theme.fg("accent", `↓ ${remaining} lines below · G ${this.showPrompt ? "bottom" : "follow"}`) : "";
+    const keys = this.cancelHint(job) ?? theme.fg("dim", this.inputMode ? "enter send · esc cancel" : `${this.showPrompt ? "p transcript · j/k scroll" : "p prompt · ctrl+o tools"} · ? more${pendingJob(job) ? " · x cancel" : ""} · esc back`);
     return [...top, rule("├", "┤"), ...shown.map(row), rule("├", "┤", "", below), ...pinned.map(row), rule("╰", "╯", keys)];
   }
 }
