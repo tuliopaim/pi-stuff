@@ -28,7 +28,7 @@ export default function plannotatorPhone(pi: ExtensionAPI) {
     active = false;
     let config: { enabled?: boolean; tailscale?: string } = {};
     try { config = JSON.parse(readFileSync(configPath, "utf8")); } catch { /* Opt in per machine. */ }
-    if (config.enabled !== true || ctx.mode !== "tui") {
+    if (config.enabled !== true || (ctx.mode !== "tui" && ctx.mode !== "rpc")) {
       const state = shared.__plannotatorPhone_v1;
       if (state) {
         clearInterval(state.timer); await state.links.stop();
