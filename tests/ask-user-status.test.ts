@@ -68,7 +68,7 @@ test("ask_user clears the Herdr blocker if custom UI creation fails", async () =
 });
 
 test("headless and already-aborted questions never publish blocked", async () => {
-  const headless = harness({ mode: "rpc" });
+  const headless = harness({ mode: "print" });
   await headless.run();
   const aborted = harness();
   await aborted.run(AbortSignal.abort());
