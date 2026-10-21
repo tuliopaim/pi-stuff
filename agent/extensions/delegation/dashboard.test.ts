@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { TuiAltScreen, TuiMainScreen, visibleWidth } from "@earendil-works/pi-tui";
 import { AssistantMessageComponent, ToolExecutionComponent, createBashToolDefinition, initTheme } from "@earendil-works/pi-coding-agent";
-import { Dashboard } from "./dashboard.ts";
+import { Dashboard, showAgents } from "./dashboard.ts";
 import { jobActivity, terminalText } from "./presentation.ts";
 import type { Job } from "./durable.ts";
 
@@ -186,4 +186,94 @@ test("wheel events scroll the inspector and move the list selection instead of t
   assert.doesNotMatch(scrolled, /line-79/);
   assert.match(scrolled, /↓ 5 lines below/);
   assert.equal(dashboard.handleMouse({ type: "click" } as any), undefined);
+});
+
+test("dashboard covers every terminal cell in list and inspector, including after resize", async (t) => {
+  const terminal = { rows: 30 };
+  const dashboard = new Dashboard({ terminal, requestRender() {} } as any, theme as any, keys as any,
+    { list: async () => [job("one")], subscribe: () => () => {}, preview: () => "", transcript: async () => [] } as any, () => {});
+  t.after(() => dashboard.dispose()); await tick();
+  for (const detail of [false, true]) {
+    if (detail) { dashboard.handleInput("l"); await tick(); }
+    for (const rows of [30, 12, 6]) for (const width of [1, 20, 80]) {
+      terminal.rows = rows;
+      const lines = dashboard.render(width);
+      assert.equal(lines.length, rows, "no parent rows exposed above or below the overlay");
+      assert.ok(lines.every((line) => visibleWidth(line) === width), "no parent columns exposed");
+    }
+  }
+});
+
+test("initial prompt has its own complete scrollable view even outside loaded history", async (t) => {
+  const task = Array.from({ length: 50 }, (_, i) => `requirement-${i}`).join("\n") + "\n" + "界".repeat(50) + " wrap-end";
+  const entry = { ...job("one"), task };
+  const dashboard = new Dashboard({ terminal: { rows: 20 }, requestRender() {} } as any, theme as any, keys as any,
+    { list: async () => [entry], subscribe: () => () => {}, preview: () => "", transcript: async () => [
+      { role: "assistant", content: [{ type: "text", text: "Latest answer" }] },
+    ] } as any, () => {}, "one");
+  t.after(() => dashboard.dispose()); await tick();
+  assert.match(terminalText(dashboard.render(60).join("\n")), /p prompt/);
+  dashboard.handleInput("p");
+  let text = terminalText(dashboard.render(60).join("\n"));
+  assert.match(text, /Initial prompt/);
+  assert.match(text, /requirement-0/);
+  assert.doesNotMatch(text, /Latest answer|more lines · ctrl\+o/);
+  dashboard.handleInput("app.tools.expand");
+  assert.match(terminalText(dashboard.render(60).join("\n")), /requirement-0/, "tools toggle cannot collapse or jump the prompt");
+  const seen = new Set<string>();
+  for (let i = 0; i < 60; i++) {
+    text = terminalText(dashboard.render(30).join("\n"));
+    for (const match of text.matchAll(/requirement-\d+/g)) seen.add(match[0]);
+    dashboard.handleInput("j");
+  }
+  assert.equal(seen.size, 50, "every prompt line can be read without expanding tools or loading history");
+  assert.match(text, /wrap-end/, "long wide-character lines wrap rather than truncate");
+  dashboard.handleInput("p");
+  assert.match(terminalText(dashboard.render(60).join("\n")), /Latest answer/);
+});
+
+test("transcript user messages remain complete with tools collapsed", async (t) => {
+  const prompt = Array.from({ length: 20 }, (_, i) => `prompt-line-${i}`).join("\n\n");
+  const dashboard = new Dashboard({ terminal: { rows: 80 }, requestRender() {} } as any, theme as any, keys as any,
+    { list: async () => [job("one")], subscribe: () => () => {}, preview: () => "", transcript: async () => [
+      { role: "user", content: prompt },
+    ] } as any, () => {}, "one");
+  t.after(() => dashboard.dispose()); await tick();
+  const text = terminalText(dashboard.render(80).join("\n"));
+  assert.match(text, /prompt-line-0/);
+  assert.match(text, /prompt-line-19/);
+  assert.doesNotMatch(text, /more lines · ctrl\+o/);
+});
+
+for (const Renderer of [TuiMainScreen, TuiAltScreen]) test(`inspector caller fills actual ${Renderer.name} overlay bounds without clipping or parent leakage`, async (t) => {
+  let output = "";
+  const terminal = { rows: 30, columns: 80, kittyProtocolActive: false,
+    start() {}, stop() {}, drainInput: async () => {}, write(data: string) { output += data; },
+    moveBy() {}, hideCursor() {}, showCursor() {}, clearLine() {}, clearFromCursor() {}, clearScreen() {}, setTitle() {}, setProgress() {} };
+  const tui = new Renderer(terminal);
+  tui.start();
+  tui.addChild({ invalidate() {}, render: () => Array.from({ length: terminal.rows }, () => "Received arguments:") });
+  let dashboard!: Dashboard;
+  let handle!: ReturnType<typeof tui.showOverlay>;
+  const manager = { list: async () => [job("one")], subscribe: () => () => {}, preview: () => "", transcript: async () => [] };
+  await showAgents({ ui: { custom(factory: any, options: any) {
+    assert.equal(options.overlay, true);
+    dashboard = factory(tui, theme, keys, () => {});
+    handle = tui.showOverlay(dashboard, options.overlayOptions);
+    return Promise.resolve(undefined);
+  } } } as any, manager as any, "one");
+  t.after(() => { dashboard.dispose(); tui.stop(); });
+  await tick();
+  for (const rows of [30, 12, 6]) for (const width of [1, 20, 80]) {
+    terminal.rows = rows; terminal.columns = width;
+    output = "";
+    tui.renderNow(true);
+    assert.deepEqual(handle.getBounds(), { row: 0, col: 0, width, height: rows });
+    assert.doesNotMatch(output, /Received arguments:/, "the compositor must replace all parent rows");
+    if (width >= 20) {
+      const lines = dashboard.render(width);
+      assert.ok(lines[0].startsWith("╭"), "top border remains visible");
+      assert.ok(lines.at(-1)!.startsWith("╰") && lines.at(-1)!.endsWith("╯"), `bottom border remains visible at ${width}x${rows}: ${JSON.stringify(lines.at(-1))}`);
+    }
+  }
 });
