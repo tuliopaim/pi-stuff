@@ -246,3 +246,48 @@ before running `npm test`, or run it directly:
 PI_TEST_HOST_DIR=/path/to/pi-coding-agent \
   node --test --experimental-strip-types ~/dotfiles/pi/tests/work-guard-host.test.ts
 ```
+
+## OptChat cache retention
+
+`pi-opt` and `pi-optw` load the local OptChat 0.8.9 source snapshot in
+`vendor/pi-optchat`. Anthropic cache retention defaults to one hour for main
+and connected conversations, five minutes for delegated agents, summarization,
+and history import. Hits refresh expiry. Longer retention helps pauses, not
+continuous tool calls, and one-hour writes cost more.
+
+Controls are independent per workload:
+
+```sh
+pi-optw                             # conversation long, background short
+PI_CACHE_RETENTION=short pi-optw    # conversation short, background short
+PI_CACHE_RETENTION=none pi-optw     # master off, even with workload overrides
+OPTCHAT_CACHE_CONNECTED=short pi-optw
+OPTCHAT_CACHE_DELEGATED=long pi-optw
+OPTCHAT_CACHE_COMPACTOR=long pi-optw
+```
+
+`OPTCHAT_CACHE_MAIN`, `OPTCHAT_CACHE_CONNECTED`, `OPTCHAT_CACHE_DELEGATED`,
+`OPTCHAT_CACHE_COMPACTOR`, and `OPTCHAT_CACHE_IMPORT` accept `long`, `short`,
+or `none`. Restart the owner session to reload code or environment settings.
+Connected windows run their requests in the owner process and use its policy.
+The same controls work for `pi-opt` on Anthropic. OpenAI is unaffected by
+these custom Anthropic markers.
+
+New Anthropic usage ledger records include `workload`, `requestedRetention`,
+and `cachePolicy: "workload-v1"`. Historical/recovered usage without an observed
+request stays untagged. Usage retains Pi's provider-reported `cacheWrite1h`
+when available. No prompts or credentials are added to telemetry.
+
+AI Usage exports a policy comparison table for Grafana. Compare the same model
+and workload across comparable windows using weighted cache-hit rate, input
+cost per million prompt tokens, write volume, and sample size. Pi's cost
+estimates account for the reported one-hour write premium, but are not invoices.
+Do not infer achieved TTL from requested retention or declare savings from hit
+rate alone. See `vendor/pi-optchat/LOCAL-CHANGES.md` for provenance.
+
+Regression checks:
+
+```sh
+python3 ../scripts/tests/pi-opt.test.py
+agent/node_modules/.bin/tsx --test tests/optchat-cache-*.test.ts
+```
