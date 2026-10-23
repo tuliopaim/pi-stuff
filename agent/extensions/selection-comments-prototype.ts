@@ -1,5 +1,5 @@
-// Prototype: select text in fullscreen Pi, save notes, then explicitly send a batch.
-import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+// Prototype: saved selection comments attach to the next user message.
+import type { ExtensionAPI, ExtensionContext, InputEvent, InputEventResult, Theme } from "@earendil-works/pi-coding-agent";
 import {
   Box,
   CURSOR_MARKER,
@@ -278,6 +278,7 @@ export class CommentDialog extends Box implements Focusable {
 export class SelectionComments implements Component {
   private notes: Note[] = [];
   private lastSubmitted: Note[] = [];
+  private attached = true;
   private selection?: Selection;
   private cite?: OverlayHandle;
   private cancelComment?: () => void;
@@ -292,6 +293,8 @@ export class SelectionComments implements Component {
   private theme: Theme;
   private reviewX = 0;
   private sendX = 0;
+  private attachX = 0;
+  private renderedWidth = 0;
 
   constructor(
     tui: TUI,
@@ -321,15 +324,38 @@ export class SelectionComments implements Component {
       note.quote.trim() && note.comment.trim()).map((note) => ({ quote: note.quote, comment: note.comment })) : [];
     this.notes.splice(0, this.notes.length, ...read(data?.notes));
     this.lastSubmitted = read(data?.lastSubmitted);
+    this.attached = data?.attached !== false;
     this.tui.requestRender();
   }
 
-  private changeNotes(notes: readonly Note[], lastSubmitted = this.lastSubmitted): void {
+  private changeNotes(notes: readonly Note[], lastSubmitted = this.lastSubmitted, attached = this.attached): void {
     const next = notes.map((note) => ({ ...note }));
-    this.pi.appendEntry(QUEUE_ENTRY, { notes: next, lastSubmitted: lastSubmitted.map((note) => ({ ...note })) });
+    this.pi.appendEntry(QUEUE_ENTRY, { notes: next, lastSubmitted: lastSubmitted.map((note) => ({ ...note })), attached });
     this.notes.splice(0, this.notes.length, ...next);
     this.lastSubmitted = [...lastSubmitted];
+    this.attached = attached;
     this.tui.requestRender();
+  }
+
+  attachInput(event: InputEvent): InputEventResult {
+    if (this.disposed || event.source === "extension" || !this.attached || !this.notes.length) {
+      return { action: "continue" };
+    }
+    const text = `${event.text}\n\n${commentsPrompt(this.notes)}`;
+    try {
+      // Persist recovery before consuming, including when Pi queues a busy follow-up.
+      this.changeNotes([], [...this.notes]);
+    } catch (error) {
+      this.ctx.ui.notify(`Could not attach comments: ${String(error)}. Saved notes are kept; this message has no comments attached.`, "error");
+      return { action: "continue" };
+    }
+    return { ...event, action: "transform", text };
+  }
+
+  setAttachment(attached: boolean): void {
+    if (this.disposed) return;
+    try { this.changeNotes(this.notes, this.lastSubmitted, attached); }
+    catch (error) { this.ctx.ui.notify(`Could not change comment attachment: ${String(error)}. Saved notes are kept.`, "error"); }
   }
 
   recoverNotes(): void {
@@ -365,19 +391,25 @@ export class SelectionComments implements Component {
     // Pi retains widget instances when switching between fullscreen and regular mode.
     if (this.terminal !== this.tui.terminal) this.bind();
     if (this.disposed || !this.notes.length) return [];
-    const label = `${this.notes.length} saved ${this.notes.length === 1 ? "note" : "notes"}`;
+    const label = this.attached ? `${this.notes.length} comments attached` : `${this.notes.length} comments saved`;
+    const attachLabel = this.attached ? "Detach" : "Attach again";
+    this.renderedWidth = width;
     this.reviewX = visibleWidth(label) + 3;
-    this.sendX = this.reviewX + 9;
+    this.attachX = this.reviewX + 9;
+    this.sendX = this.attachX + visibleWidth(attachLabel) + 3;
     return [truncateToWidth(this.theme.fg("muted", label) + this.theme.fg("dim", " · ") +
       this.theme.fg("muted", "Review") + this.theme.fg("dim", " · ") +
+      this.theme.fg("muted", attachLabel) + this.theme.fg("dim", " · ") +
       this.theme.fg("accent", "Send all") + this.theme.fg("dim", "  F8"), width, "")];
   }
 
   handleMouse(event: TuiMouseEvent) {
-    if (this.disposed) return undefined;
+    if (this.disposed || !this.notes.length || event.y !== 0) return undefined;
     if (event.button !== "left" || event.type !== "click") return undefined;
-    if (event.x >= this.reviewX && event.x < this.reviewX + 6) void this.openComment(true);
-    else if (event.x >= this.sendX && event.x < this.sendX + 8) this.sendAll();
+    const hit = (x: number, length: number) => x + length <= this.renderedWidth && event.x >= x && event.x < x + length;
+    if (hit(this.reviewX, 6)) void this.openComment(true);
+    else if (hit(this.attachX, this.attached ? 6 : 12)) this.setAttachment(!this.attached);
+    else if (hit(this.sendX, 8)) this.sendAll();
     else return undefined;
     return { handled: true, render: true };
   }
@@ -575,7 +607,8 @@ export default function (pi: ExtensionAPI) {
       return widget;
     });
   });
-  pi.on("session_shutdown", () => widget?.dispose());
+  pi.on("input", (event) => widget?.attachInput(event));
+  pi.on("session_shutdown", () => { widget?.dispose(); widget = undefined; });
   pi.on("session_tree", () => widget?.restore());
   pi.registerCommand("cite", {
     description: "Add a note on the last mouse-selected passage (prototype, fullscreen only)",
@@ -589,11 +622,13 @@ export default function (pi: ExtensionAPI) {
     handler: async () => { await widget?.openComment(); },
   });
   pi.registerCommand("notes", {
-    description: "Review saved notes, /notes send to send all, /notes recover to restore the last submitted batch",
+    description: "Review notes, /notes attach or detach, /notes send, /notes recover",
     handler: async (args, ctx) => {
       if (!widget) { ctx.ui.notify("Notes require interactive Pi.", "warning"); return; }
       if (args.trim() === "send") widget.sendAll();
-      else {
+      else if (args.trim() === "attach" || args.trim() === "detach") {
+        widget.setAttachment(args.trim() === "attach");
+      } else {
         if (args.trim() === "recover") widget.recoverNotes();
         await widget.openComment(true);
       }

@@ -7,26 +7,26 @@ The requested interaction is possible inside fullscreen Pi, without changing Her
 From any project, start Pi with the additional extension:
 
 ```sh
-pi -e /Users/tuliopaim/dotfiles/pi-selection-comments/agent/extensions/selection-comments-prototype.ts
+pi -e /Users/tuliopaim/dotfiles/pi/agent/extensions/selection-comments-prototype.ts
 ```
 
 1. Use fullscreen mode, selectable through `/settings`.
 2. Drag-select some transcript text, then click Comment, right-click the selection, or press F6.
 3. Type a comment. Click Save, or press Enter or Ctrl+S, to save it without sending. The card closes and the list stays hidden.
 4. Select another passage and add a note. The card shows your saved notes below the new comment.
-5. Click Send all or press Ctrl+Enter to send one message containing the saved notes and any current comment. The next card starts with an empty list.
+5. Send your next normal message. Saved comments attach automatically, without changing the editor draft. Or click Send all or press Ctrl+Enter in the card to send just the comments, including any current comment.
 
 Shift+Enter inserts a newline. Escape or Cancel discards only the current draft, not saved notes. Click × beside a saved note to delete it. Tab switches between editing and the list; use Up/Down and Delete or Backspace to remove a selected note. Long lists scroll with the mouse wheel.
 
-Outside the card, a quiet row above the main editor shows the saved count, Review, and Send all. Both actions are clickable. F7 or `/notes` opens the list; F8 or `/notes send` sends the saved batch. `/cite` adds another note using the last captured selection.
+Outside the card, a row above the main editor shows `N comments attached · Review · Detach · Send all`. Detach keeps the notes saved and changes the row to `N comments saved · Review · Attach again · Send all`. The actions are clickable when fully visible. F7 or `/notes` opens the list; `/notes detach` and `/notes attach` change attachment without opening a card. F8 or `/notes send` sends the saved batch even when detached. `/cite` adds another note using the last captured selection.
 
 On a Mac, use Fn/Globe with F6, F7, or F8 if those keys normally control system functions. The extension does not bind Option/Alt shortcuts.
 
-Copy-on-select continues to work. Nothing reaches the agent until you explicitly send. Messages go to the same Pi session and wait as follow-ups if the agent is busy.
+Copy-on-select continues to work. Saving alone sends nothing. Attached comments append to the actual submitted user message through Pi's input hook, preserving images and delivery mode, including busy follow-ups. Extension-origin messages skip attachment so Send all cannot include its batch twice. Explicit Send all messages wait as follow-ups if the agent is busy.
 
 The card keeps its single rounded border and neutral background. The current quote takes at most two rows. Saved notes show short quote/comment previews, at most three notes at a time, with a delete control on each. Short windows use compact previews to keep the buttons visible. Sending always includes full quotes and comments, oldest first. Send stays dim when both the list and draft are empty.
 
-Saved notes use custom Pi session entries, excluded from model context, so they survive reload and resume and follow the active session branch. Pi's public send API has no delivery acknowledgement. The list clears when the message is handed to Pi; if Pi later rejects delivery, `/notes recover` restores the last submitted batch for review. Check the transcript before resending to avoid duplicates.
+Saved notes and attachment state use custom Pi session entries, excluded from model context, so they survive reload and resume and follow the active session branch. Attachment records the last submitted batch before clearing the list. If persistence fails, the normal message proceeds without comments, the notes stay saved, and Pi shows an error. Pi's public send API and input hook have no delivery acknowledgement. If Pi later rejects delivery or a queued message is discarded, `/notes recover` restores the last submitted batch for review. Check the transcript before resending to avoid duplicates.
 
 This is a terminal popup, not a native macOS popover. It works with Pi-owned mouse selection, not selection performed by the outer terminal or Herdr's scrollback.
 
@@ -50,15 +50,17 @@ A supported version should replace the adapter with a public selection-completed
 
 ## Validation
 
-The prototype tests cover exact quote capture, right-click capture, repeated selections, mouse Save/Send/Cancel/Delete, keyboard save and batch send, bounded list scrolling, editor cursor placement, multiline comments, expanded pastes, narrow widths, card borders and backgrounds, safe disposal, unsupported hosts, branch restoration, reload, recovery, and storage/delivery failures.
+The prototype tests cover exact quote capture, right-click capture, repeated selections, mouse Save/Send/Cancel/Delete, keyboard save and batch send, bounded list scrolling, editor cursor placement, multiline comments, expanded pastes, narrow widths, card borders and backgrounds, safe disposal, unsupported hosts, branch restoration, reload, recovery, attachment composition with images and busy delivery fields, detach/reattach, extension-input exclusion, widget hit regions, and storage/delivery failures.
 
 ```sh
-npm test --prefix /Users/tuliopaim/dotfiles/pi-selection-comments/agent
+npm test --prefix /Users/tuliopaim/dotfiles/pi/agent
 ```
 
 Strict TypeScript checking passed for the extension and tests. The single-comment version also passed an in-memory smoke test using Pi 1.0.4's real loader and forwarding TUI proxy, including dark/light themes. The user confirmed that version works well in Herdr.
 
 The batch version passed the same kind of smoke test with installed Pi 1.1.0 and its real dark/light themes: right-click capture, shortcut registration, Save, review, Delete, batch send, recovery, renderer replacement, and cleanup. Checks at 8, 10, and 24 terminal rows also verified visible buttons and rejection of dialog results resolved before a branch change. No real agent request or clipboard access was made. The batch version still needs a live mouse check.
+
+The attachment update also passed a Pi 1.4.0 loader and forwarding-TUI smoke check for input composition, images, busy delivery fields, detach/restore, recovery, renderer replacement, and shutdown. No real agent request or clipboard access was made.
 
 ## Herdr findings
 
