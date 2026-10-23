@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { connectedSessionAdapter, trustedTranscript } from '../vendor/pi-optchat/src/herdr-session.ts';
 
 test('Herdr transcript references stay inside the connected profile, including symlinks', () => {
-  const root = mkdtempSync(join(tmpdir(), 'optchat-herdr-'));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'optchat-herdr-')));
   try {
     const runs = join(root, 'runs');
     mkdirSync(runs);
@@ -24,7 +24,7 @@ test('Herdr transcript references stay inside the connected profile, including s
 });
 
 test('Herdr adapter reports connected transcript through the managed reporter and resets on session start', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'optchat-herdr-'));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'optchat-herdr-')));
   try {
     const transcript = join(root, 'connected.jsonl');
     writeFileSync(transcript, '{}\n');
