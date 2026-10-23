@@ -2,6 +2,8 @@
 
 My [Pi](https://github.com/earendil-works/pi) configuration for coding: named subagents, interactive questions, a status footer, reusable prompts and skills, and editor-assisted review.
 
+Plannotator reviews can publish private Tailscale links for use from a phone alongside Herdr Web UI. See [phone reviews](docs/phone-reviews.md) for setup and commands.
+
 ## Subagents
 
 Subagents use Pi 1.0's experimental [Pi Durable](https://earendil.com/posts/pi-durable/) package. Each job has its own conversation, model, instructions, tools, skills, and working directory. Durable handles transcripts, model retries, compaction, interrupted tool calls, and recovery.
