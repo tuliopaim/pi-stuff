@@ -287,7 +287,7 @@ test("delivery failure keeps the notes queued and does not disturb the main-edit
     h.terminal.input("\x1b[13;5u");
     await pending;
     assert.equal(h.draft, "Existing unsent prompt");
-    assert.ok(h.controller.render().join("").includes("1 saved note"));
+    assert.ok(h.controller.render().join("").includes("1 comments attached"));
     assert.ok(h.notices.some((notice) => notice.includes("Saved notes are kept")));
   } finally { h.close(); }
 });
@@ -418,7 +418,7 @@ test("Enter and Ctrl+S save hidden notes; the next card lists them and Ctrl+Ente
     await saveNote(h, "First comment");
     assert.equal(h.sent.length, 0);
     assert.equal(h.tui.hasOverlay(), false);
-    assert.ok(h.controller.render().join("").includes("1 saved note"));
+    assert.ok(h.controller.render().join("").includes("1 comments attached"));
     assert.ok(!h.tui.getScreenLines().join("").includes("First comment"));
     h.select(6, 0, 9, 0);
     const pending = h.controller.openComment();
@@ -430,7 +430,7 @@ test("Enter and Ctrl+S save hidden notes; the next card lists them and Ctrl+Ente
     h.terminal.input("\x13");
     await pending;
     assert.equal(h.sent.length, 0);
-    assert.ok(h.controller.render().join("").includes("2 saved notes"));
+    assert.ok(h.controller.render().join("").includes("2 comments attached"));
     const review = h.controller.openComment(true);
     h.terminal.input("\x1b[13;5u");
     await review;
@@ -516,7 +516,7 @@ test("unsent notes survive reload; submitted batches can be recovered without lo
   first.close();
   const resumed = harness({ entries: first.entries });
   try {
-    assert.ok(resumed.controller.render().join("").includes("1 saved note"));
+    assert.ok(resumed.controller.render().join("").includes("1 comments attached"));
     resumed.controller.sendAll();
     assert.equal(resumed.sent[0].content, commentsPrompt([{ quote: "alpha", comment: "Keep across reload" }]));
     assert.equal(JSON.stringify(first.entries[0]), firstSnapshot);
@@ -669,7 +669,7 @@ test("if recording submission fails, the batch stays queued and the user is warn
     options.failSave = true;
     h.controller.sendAll();
     assert.equal(h.sent.length, 1);
-    assert.ok(h.controller.render().join("").includes("1 saved note"));
+    assert.ok(h.controller.render().join("").includes("1 comments attached"));
     assert.ok(h.notices.some((notice) => notice.includes("Check before resending")));
   } finally { h.close(); }
 });
@@ -711,4 +711,147 @@ test("short terminals keep all actions onscreen by compacting quote and queue pr
       assert.equal(dialog.editor.getExpandedText(), "Keep the comment intact");
     }
   } finally { h.close(); }
+});
+
+const userInput = (text = "Please update it") => ({
+  type: "input" as const, source: "interactive" as const, text,
+  images: [{ type: "image" as const, mimeType: "image/png", data: "image-data" }],
+  streamingBehavior: "followUp" as const,
+});
+
+test("attached comments compose once with actual busy input, preserve fields, and remain recoverable", async () => {
+  const h = harness({ busy: true });
+  try {
+    h.select();
+    await saveNote(h, "First attached comment");
+    h.select(6, 0, 9, 0);
+    await saveNote(h, "Second attached comment");
+    assert.equal(h.draft, "Existing unsent prompt");
+    assert.equal(h.sent.length, 0);
+    const event = userInput();
+    const notes = [{ quote: "alpha", comment: "First attached comment" }, { quote: "beta", comment: "Second attached comment" }];
+    const result = h.controller.attachInput(event);
+    assert.deepEqual(result, { ...event, action: "transform", text: `${event.text}\n\n${commentsPrompt(notes)}` });
+    if (result.action === "transform") assert.equal(result.images, event.images);
+    assert.deepEqual(h.controller.render(), []);
+    assert.deepEqual(h.controller.attachInput(userInput("Another message")), { action: "continue" });
+    assert.equal(h.draft, "Existing unsent prompt");
+    h.controller.restore();
+    h.controller.recoverNotes();
+    assert.deepEqual(h.controller.attachInput(userInput()), result);
+    assert.equal(h.sent.length, 0);
+  } finally { h.close(); }
+});
+
+test("Detach and Attach again are clickable, keep saved notes, and restore across reload and branches", async () => {
+  const first = harness();
+  first.select();
+  await saveNote(first, "Stay saved");
+  clickText(first, "Detach");
+  assert.ok(first.controller.render().join("").includes("1 comments saved · Review · Attach again · Send all"));
+  assert.deepEqual(first.controller.attachInput(userInput()), { action: "continue" });
+  const attachedBranch = first.entries.slice(0, 1);
+  first.close();
+  const h = harness({ entries: first.entries });
+  try {
+    assert.ok(h.controller.render().join("").includes("Attach again"));
+    clickText(h, "Attach again");
+    assert.ok(h.controller.render().join("").includes("1 comments attached · Review · Detach · Send all"));
+    clickText(h, "Detach");
+    h.entries.splice(0, h.entries.length, ...attachedBranch);
+    h.controller.restore();
+    assert.equal(h.controller.attachInput(userInput()).action, "transform");
+    h.controller.recoverNotes();
+    h.controller.setAttachment(false);
+    h.controller.sendAll();
+    assert.equal(h.sent.length, 1, "Send all works even when detached");
+  } finally { h.close(); }
+});
+
+test("extension-origin input bypasses attachments so Send all cannot duplicate its batch", async () => {
+  const h = harness();
+  const original = h.pi.sendUserMessage;
+  h.pi.sendUserMessage = (content, options) => {
+    assert.deepEqual(h.controller.attachInput({ ...userInput(String(content)), source: "extension" }), { action: "continue" });
+    original(content, options);
+  };
+  try {
+    h.select();
+    await saveNote(h, "Send only once");
+    assert.deepEqual(h.controller.attachInput({ ...userInput("Other extension"), source: "extension" }), { action: "continue" });
+    assert.ok(h.controller.render().join("").includes("1 comments attached"));
+    h.controller.sendAll();
+    assert.equal(h.sent[0].content, commentsPrompt([{ quote: "alpha", comment: "Send only once" }]));
+    assert.deepEqual(h.controller.attachInput(userInput()), { action: "continue" });
+  } finally { h.close(); }
+});
+
+test("attachment persistence failures keep notes and their previous attachment state", async () => {
+  const options = { failSave: false };
+  const h = harness(options);
+  try {
+    h.select();
+    await saveNote(h, "Do not lose this");
+    options.failSave = true;
+    h.controller.setAttachment(false);
+    assert.ok(h.controller.render().join("").includes("comments attached"));
+    assert.deepEqual(h.controller.attachInput(userInput()), { action: "continue" });
+    assert.ok(h.controller.render().join("").includes("1 comments attached"));
+    assert.ok(h.notices.some((notice) => notice.includes("this message has no comments attached")));
+    assert.equal(h.draft, "Existing unsent prompt");
+    options.failSave = false;
+    assert.equal(h.controller.attachInput(userInput()).action, "transform");
+    h.controller.restore();
+    h.controller.recoverNotes();
+    assert.ok(h.controller.render().join("").includes("1 comments attached"));
+  } finally { h.close(); }
+});
+
+test("widget widths and mouse hit regions never activate clipped or stale actions", async () => {
+  const h = harness();
+  try {
+    h.select();
+    await saveNote(h, "Narrow widget");
+    for (const attached of [true, false]) {
+      h.controller.setAttachment(attached);
+      for (const width of [0, 8, 18, 32, 40, 52, 80]) {
+        const line = stripTerminalSequences(h.controller.render(width)[0]);
+        assert.ok(visibleWidth(line) <= width);
+        if (!line.includes("Send all")) {
+          assert.equal(h.controller.handleMouse({ type: "click", button: "left", x: width + 5, y: 0 } as never), undefined);
+          assert.equal(h.sent.length, 0);
+        }
+      }
+    }
+    h.controller.render(80);
+    assert.equal(h.controller.handleMouse({ type: "click", button: "left", x: 22, y: 1 } as never), undefined);
+    h.controller.dispose();
+    assert.deepEqual(h.controller.attachInput(userInput()), { action: "continue" });
+  } finally { h.close(); }
+});
+
+test("registered input hook follows widget startup, branch restore, and shutdown", async () => {
+  const h = harness();
+  h.controller.dispose();
+  const handlers = new Map<string, (...args: any[]) => any>();
+  let widget: SelectionComments | undefined;
+  const ctx = { ...h.ctx, ui: { ...h.ctx.ui, setWidget: (_key: string, factory: (tui: TUI, theme: Theme) => SelectionComments) => {
+    widget = factory(h.tui, theme);
+  } } };
+  selectionComments({ ...h.pi,
+    on: (name: string, handler: (...args: any[]) => any) => { handlers.set(name, handler); },
+    registerCommand() {}, registerShortcut() {},
+  } as unknown as ExtensionAPI);
+  try {
+    assert.equal(handlers.get("input")!(userInput()), undefined);
+    handlers.get("session_start")!({}, ctx);
+    h.entries.push({ type: "custom", customType: "selection-comments-queue", data: {
+      notes: [{ quote: "Restored quote", comment: "Restored comment" }],
+    } });
+    handlers.get("session_tree")!();
+    const event = { ...userInput(), source: "rpc" as const };
+    assert.deepEqual(handlers.get("input")!(event), { ...event, action: "transform", text: `${event.text}\n\n${commentsPrompt([{ quote: "Restored quote", comment: "Restored comment" }])}` });
+    handlers.get("session_shutdown")!();
+    assert.equal(handlers.get("input")!(userInput()), undefined);
+  } finally { widget?.dispose(); h.close(); }
 });
