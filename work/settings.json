@@ -11,8 +11,7 @@
     {
       "source": "npm:@plannotator/pi-extension",
       "skills": []
-    },
-    "npm:pi-optmem@1.0.0"
+    }
   ],
   "extensions": ["~/dotfiles/pi/agent/extensions"],
   "prompts": ["~/dotfiles/pi/agent/prompts"],

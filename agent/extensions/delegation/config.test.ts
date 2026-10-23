@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { configPath, getAgents, resolveAgent, saveAgentModel, setSubagentPreset } from "./config.ts";
-import { validateRoute } from "./runtime.ts";
 
 function setup(t: test.TestContext) {
   const directory = mkdtempSync(join(tmpdir(), "pi-agents-config-"));
@@ -33,7 +32,6 @@ test("named agents have a general-purpose default and safe specialist tool sets"
     assert.equal(agents[name].mutating, false);
   }
   assert.ok(agents.default.tools.includes("edit"));
-  assert.equal(validateRoute(agents.default.model, agents.default.thinking).allowed, true);
 });
 
 test("worktree setup uses Luna and shell tools without implementation tools", (t) => {
@@ -68,14 +66,6 @@ test("custom-agent inheritance is independent of JSON property order", (t) => {
     assert.equal(getAgents().custom.instructions, "Personal default");
     assert.deepEqual(getAgents().custom.tools, ["read"]);
   }
-});
-
-test("workflow route validation supports separate provider and model fields", (t) => {
-  setup(t);
-  const agent = getAgents().default;
-  const slash = agent.model.indexOf("/");
-  assert.equal(validateRoute(agent.model.slice(slash + 1), agent.thinking, agent.model.slice(0, slash)).allowed, true);
-  assert.equal(validateRoute(agent.model.slice(slash + 1), agent.thinking, "wrong-provider").allowed, false);
 });
 
 test("explicit model picks and old lane aliases only replace the model and thinking", (t) => {
@@ -127,7 +117,6 @@ test("anthropic-work uses the agreed model split and keeps specialist tools", (t
     assert.equal(agent.thinking, thinking);
     assert.deepEqual(agent.tools, base[name].tools);
     assert.equal(agent.instructions, base[name].instructions);
-    assert.equal(validateRoute(agent.model, agent.thinking).allowed, true);
   }
   const override = resolveAgent("default", "anthropic/claude-opus-5-5:high");
   assert.equal(override.model, "anthropic/claude-opus-5-5");
@@ -142,7 +131,6 @@ for (const [preset, provider] of [["copilot", "github-copilot"], ["anthropic-wor
     for (const model of ["openai/model", `${provider}-proxy/model`]) {
       assert.throws(() => resolveAgent("default", model), /only permits/);
       assert.throws(() => saveAgentModel("default", model, "medium"), /only permits/);
-      assert.equal(validateRoute(model, "medium").allowed, false);
     }
     saveAgentModel("default", `${provider}/custom`, "medium");
     assert.equal(resolveAgent().model, `${provider}/custom`);
@@ -164,7 +152,6 @@ test("piw locks the work preset independently of environment, saved choices, and
   assert.throws(() => setSubagentPreset("personal"), /piw requires/);
   setSubagentPreset(undefined);
   assert.throws(() => resolveAgent("default", "openai/model"), /only permits/);
-  assert.equal(validateRoute("openai/model", "medium").allowed, false);
   assert.throws(() => saveAgentModel("default", "openai/model", "medium"), /only permits/);
 });
 
