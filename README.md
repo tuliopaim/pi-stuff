@@ -1,6 +1,6 @@
 # My Pi setup
 
-My [Pi](https://github.com/earendil-works/pi) configuration for coding: named subagents, multi-agent workflows, interactive questions, a status footer, reusable prompts and skills, and editor-assisted review.
+My [Pi](https://github.com/earendil-works/pi) configuration for coding: named subagents, interactive questions, a status footer, reusable prompts and skills, and editor-assisted review.
 
 ## Subagents
 
@@ -94,6 +94,8 @@ Jobs have a 30-minute active-time limit by default, including elapsed active tim
 
 ### Restart behavior and limits
 
+Named-agent guidance uses Pi's structured `named_subagents` prompt section. Preset and tool changes append native transcript updates rather than replacing the leading system prompt. This requires Pi 1.4.
+
 Each parent session owns `~/.pi/agent/subagents/<session-id>.sqlite`. A lock prevents two processes from opening the same database. Reopen the parent session to resume unfinished jobs, including interrupted foreground jobs. Settled, undelivered background results are also recovered. Messages continue the same child conversation; active messages steer it at the next turn boundary.
 
 With `--no-session`, jobs use memory too. Restart recovery requires a saved parent session.
@@ -120,21 +122,6 @@ The `ask_user` tool asks one question with 2–5 likely answers and a free-form 
 
 It shows the working directory, selected model, context usage, session cost, generation speed, branch, changed-file count, and extension status messages.
 
-## Multi-agent workflows
-
-Named agents are always available. Workflows remain opt-in:
-
-```text
-/delegate Add organization-level API tokens
-/workflow Scout this repository with several agents
-```
-
-`/delegate` lets the parent choose how to hand off work. `/workflow`, or an explicit request to run a workflow, enables the `workflow` tool for one run and requires a model-authored orchestration script. The workflow tool becomes inactive when that run settles; `agent`, `scout`, `review`, and `commit` stay available.
-
-Workflows support `phase(title)`, `agent(prompt, options)`, `parallel([...])`, and `args`. They run sandboxed scripts, cap concurrency at four children and total calls at 32, and save artifacts under `~/.pi/agent/workflows/<runId>/`. `/workflows` opens their existing dashboard. Workflows still use the coding-agent SDK; this change ports the subagent module, not the separate workflow runner.
-
-Each workflow child supplies an explicit model and reasoning effort. Allowed pairs come from the active named-agent configuration. Required child failures stop dependent phases. Schema-bound results are available for structured handoffs. Connected implementation stays with at most one mutating child, and nothing commits automatically.
-
 ## Plans, prompts, and skills
 
 `/implement-plan <path>` reads a Markdown plan, asks for confirmation, and starts a fresh Pi session containing the plan and repository files. Without a path, it checks names such as `plans/PLAN.md` and `plan.md`.
@@ -150,7 +137,6 @@ agent/
 ├── extensions/
 │   ├── delegation/               # config, Durable jobs, tools, and native dialogs
 │   ├── web-tools/                # public web search and fetch
-│   ├── workflows/                # existing workflow runner and dashboard
 │   ├── shared/                   # resource loading, trust, timeouts, and status
 │   ├── ask-user.ts
 │   ├── context-tokens-footer.ts
@@ -160,7 +146,7 @@ agent/
 
 ## Setup
 
-This repository expects to live at `~/dotfiles`. Install extension dependencies on each machine, with Pi 1.0 and Node 22.22.2 or newer. Pi itself supports Node 22.19, which also passes this setup's checks, but one upstream dependency requests the newer patch release.
+This repository expects to live at `~/dotfiles`. Install extension dependencies on each machine, with Pi 1.4 and Node 22.22.2 or newer. Pi itself supports Node 22.19, which also passes this setup's checks, but one upstream dependency requests the newer patch release.
 
 ```sh
 npm ci --prefix ~/dotfiles/pi/agent
@@ -183,12 +169,11 @@ Pi 1.0's published shrinkwrap pins `brace-expansion` 5.0.9 in the host package. 
 npm test --prefix ~/dotfiles/pi/agent
 npm run test:agents --prefix ~/dotfiles/pi/agent
 npm run typecheck:agents --prefix ~/dotfiles/pi/agent
-npm run test:workflows --prefix ~/dotfiles/pi/agent
 npm run typecheck:web-tools --prefix ~/dotfiles/pi/agent
 python3 ~/dotfiles/scripts/tests/piw.test.py
 ```
 
-The work guard's host-runtime regression test needs Pi 1.3. Set
+The host-runtime regressions, including the offline subagent prefix and discovery checks, need Pi 1.4. Set
 `PI_TEST_HOST_DIR` to the installed `@earendil-works/pi-coding-agent` package
 before running `npm test`, or run it directly:
 

@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { writeFileAtomic } from "../workflows/serialization.ts";
+import { writeFileAtomic } from "../shared/write-file-atomic.ts";
 
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export const TOOL_NAMES = ["read", "grep", "find", "ls", "bash", "edit", "write"] as const;

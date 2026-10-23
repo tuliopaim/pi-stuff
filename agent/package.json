@@ -4,7 +4,6 @@
   "dependencies": {
     "@earendil-works/pi-durable": "1.0.0",
     "@earendil-works/chord": "1.0.0",
-    "acorn": "^8.17.0",
     "effect": "4.0.0-beta.99",
     "html-to-text": "^9.0.5",
     "linkedom": "^0.18.12",
@@ -28,8 +27,7 @@
     "typebox": "*"
   },
   "scripts": {
-    "test": "node --test --experimental-strip-types extensions/workflows/*.test.ts extensions/delegation/*.test.ts ../tests/*.test.ts && npm run test:web-tools",
-    "test:workflows": "node --test --experimental-strip-types extensions/workflows/*.test.ts",
+    "test": "node --test --experimental-strip-types extensions/shared/*.test.ts extensions/delegation/*.test.ts ../tests/*.test.ts && npm run test:web-tools",
     "test:agents": "node --test --experimental-strip-types extensions/delegation/*.test.ts",
     "typecheck:agents": "tsc --noEmit --project extensions/delegation/tsconfig.json",
     "test:web-tools": "node --import tsx --test extensions/web-tools/test/*.test.ts",

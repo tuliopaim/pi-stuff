@@ -315,7 +315,7 @@ for (const terminal of ["done", "failed", "cancelled"] as const) test(`backgroun
   assert.doesNotMatch(completed, /Started agent/);
 });
 
-test("delegated workflow children never register orchestration tools", (t) => {
+test("delegated children never register orchestration tools", (t) => {
   const previous = process.env.PI_DELEGATED; process.env.PI_DELEGATED = "1";
   try { assert.equal(harness(t).tools.size, 0); }
   finally { if (previous === undefined) delete process.env.PI_DELEGATED; else process.env.PI_DELEGATED = previous; }
@@ -323,7 +323,9 @@ test("delegated workflow children never register orchestration tools", (t) => {
 
 test("guidance advertises specialists and the catch-all default on every turn", (t) => {
   const { events } = harness(t);
-  const guidance = events.get("before_agent_start")({ systemPrompt: "base" }).systemPrompt;
+  const event = { systemPrompt: "base", systemPromptOptions: { selectedTools: ["agent"], sections: {} as Record<string, string> } };
+  assert.equal(events.get("before_agent_start")(event), undefined);
+  const guidance = event.systemPromptOptions.sections.named_subagents;
   assert.match(guidance, /explore:/); assert.match(guidance, /plan:/); assert.match(guidance, /default:/);
   assert.match(guidance, /useful handoffs that do not fit a specialist/);
 });
@@ -409,7 +411,7 @@ test("ephemeral parent sessions do not persist child conversations", async (t) =
   await events.get("session_shutdown")({}, ctx);
 });
 
-test("workflow children with delegation excluded neither open jobs nor reset the parent's preset", async (t) => {
+test("sessions with delegation excluded neither open jobs nor reset the parent's preset", async (t) => {
   let opened = false;
   const { events, tools } = harness(t, async () => { opened = true; });
   setSubagentPreset("copilot");
@@ -417,7 +419,7 @@ test("workflow children with delegation excluded neither open jobs nor reset the
   await events.get("session_start")({}, {});
   assert.equal(opened, false);
   assert.ok(Object.values(getAgents()).every((agent) => agent.model.startsWith("github-copilot/")));
-  assert.equal(events.get("before_agent_start")({ systemPrompt: "base" }), undefined);
+  assert.equal(events.get("before_agent_start")({ systemPrompt: "base", systemPromptOptions: { selectedTools: [], sections: {} } }), undefined);
 });
 
 test("/commit shows its task and cancellation hint before setup, then clears feedback on failure", async (t) => {
