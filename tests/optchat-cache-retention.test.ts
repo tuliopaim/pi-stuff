@@ -77,3 +77,55 @@ for (const workload of ['main', 'connected', 'delegated', 'compactor', 'import']
     }
   });
 }
+
+test('a connected window handoff keeps connected retention, overrides and master off', async () => {
+  const { windowHandoff } = await import('../vendor/pi-optchat/src/prompts.ts');
+  const saved = { ...process.env };
+  try {
+    for (const key of Object.keys(process.env)) if (key.startsWith('OPTCHAT_CACHE_')) delete process.env[key];
+    process.env.PI_CACHE_RETENTION = 'long';
+    for (const retention of ['long', 'short', 'none'] as const) {
+      process.env.OPTCHAT_CACHE_CONNECTED = retention;
+      const body = payload();
+      body.messages.push({ role: 'assistant', content: [{ type: 'text', text: 'Work completed' }] });
+      body.messages.push({ role: 'user', content: [{ type: 'text', text: windowHandoff('complete', { undelivered: [], unread: [], stopped: [] }) }] });
+      const controls = marks(cachePayload(body, { workload: 'connected' }));
+      assert.equal(controls.length, retention === 'none' ? 0 : 4);
+      for (const control of controls) assert.deepEqual(control, retention === 'long' ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' });
+      process.env.PI_CACHE_RETENTION = 'none';
+      assert.equal(marks(cachePayload(payload(), { workload: 'connected' })).length, 0);
+      process.env.PI_CACHE_RETENTION = 'long';
+    }
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+    Object.assign(process.env, saved);
+  }
+});
+
+test('handoff compactor fallback uses compactor retention, not connected retention', async () => {
+  const { createHandoffSummarizer } = await import('../vendor/pi-optchat/src/handoff.ts');
+  const saved = { ...process.env };
+  const observed: string[] = [];
+  const registry = {
+    find: () => ({ contextWindow: 100_000, maxTokens: 1000, reasoning: false }),
+    streamSimple: (_model: unknown, _context: unknown, options: { cacheRetention: string }) => {
+      observed.push(options.cacheRetention);
+      return { result: async () => ({ stopReason: 'stop', content: [{ type: 'text', text: 'Handoff' }] }) };
+    },
+  };
+  try {
+    for (const key of Object.keys(process.env)) if (key.startsWith('OPTCHAT_CACHE_')) delete process.env[key];
+    process.env.PI_CACHE_RETENTION = 'long';
+    const summarize = createHandoffSummarizer(registry as any, () => ({ provider: 'synthetic', model: 'test', thinking: 'off' }), () => {});
+    const run = { id: 'test', task: 'Task', guidance: [] } as any;
+    await summarize(run, []);
+    process.env.OPTCHAT_CACHE_COMPACTOR = 'long';
+    await summarize(run, []);
+    process.env.PI_CACHE_RETENTION = 'none';
+    await summarize(run, []);
+    assert.deepEqual(observed, ['short', 'long', 'none']);
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+    Object.assign(process.env, saved);
+  }
+});

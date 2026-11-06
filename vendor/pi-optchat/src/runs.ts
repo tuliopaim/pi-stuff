@@ -16,7 +16,8 @@ export interface RunInfo {
   parentId?: string; depth: number;
   state: RunState; report?: string;
   connected?: boolean;
-  handoff?: { reason: FinishReason; text?: string; delivered?: boolean };
+  /** `unread`: reports its subagents sent while it was paused, which it never read; its handoff includes them. */
+  handoff?: { reason: FinishReason; text?: string; delivered?: boolean; unread?: string[] };
   /** Working when Pi closed or crashed: the next start resumes it (see `Children.resumeCutOff`). */
   cutOff?: boolean;
   /** `from` is missing on runs saved before senders were recorded. */
@@ -38,6 +39,13 @@ export function transition(run: RunInfo, to: RunState) {
 export const isActiveRun = (run: RunInfo) => run.state === 'running' || run.state === 'waiting' || run.state === 'stopping' || run.state === 'paused';
 /** Live and working: a paused run is neither running nor finished. */
 export const isRunning = (run: RunInfo) => isActiveRun(run) && run.state !== 'paused';
+/** Messages queued for a run that it never read. */
+export const undelivered = (run: RunInfo) => run.guidance.filter(g => g.state === 'undelivered').map(g => g.text);
+/** A run's saved session, or undefined if it is missing or unreadable. */
+export function savedSession(run: RunInfo) {
+  try { return run.sessionFile && existsSync(run.sessionFile) ? SessionManager.open(run.sessionFile) : undefined; } catch { return undefined; }
+}
+
 /** A connected run that has ended but whose handoff summary has not reached the main agent yet. */
 export const isHandingOff = (run: RunInfo) => !isActiveRun(run) && !!run.handoff && !run.handoff.delivered;
 function isRun(value: unknown): value is RunInfo {
@@ -51,7 +59,8 @@ function isRun(value: unknown): value is RunInfo {
     && (value.cutOff === undefined || typeof value.cutOff === 'boolean')
     && (value.handoff === undefined || record(value.handoff) && ['complete', 'disconnected', 'owner-stopped', 'failed'].includes(String(value.handoff.reason))
       && (value.handoff.text === undefined || typeof value.handoff.text === 'string')
-      && (value.handoff.delivered === undefined || typeof value.handoff.delivered === 'boolean'))
+      && (value.handoff.delivered === undefined || typeof value.handoff.delivered === 'boolean')
+      && (value.handoff.unread === undefined || Array.isArray(value.handoff.unread) && value.handoff.unread.every(text => typeof text === 'string')))
     && typeof value.depth === 'number' && Number.isInteger(value.depth) && value.depth >= 1
     && (value.parentId === undefined || typeof value.parentId === 'string')
     && Array.isArray(value.guidance) && value.guidance.every(g => record(g) && typeof g.text === 'string' && typeof g.date === 'number' && ['queued', 'delivered', 'undelivered'].includes(String(g.state)) && (g.from === undefined || g.from === 'user' || g.from === 'manager'));

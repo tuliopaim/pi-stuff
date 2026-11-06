@@ -2,20 +2,23 @@ import { chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { trustedTranscript } from './herdr-session.ts';
 import { createConnection, createServer, type Socket } from 'node:net';
-import type { Children } from './agents.ts';
+import { INTERRUPTED, type Children } from './agents.ts';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { record } from './cache.ts';
 import { checkSocketPath, isWindows, profileSocket, removeStaleSocket } from './profiles.ts';
 import { textContent } from './transcript.ts';
-import { isActiveRun } from './runs.ts';
+import { isActiveRun, type RunInfo } from './runs.ts';
+import { HANDOFF_REQUEST } from './prompts.ts';
 
-type Action = 'list-agents' | 'attach' | 'start' | 'say' | 'tell-main' | 'answer' | 'complete';
+const ACTIONS = ['list-agents', 'attach', 'start', 'say', 'tell-main', 'answer', 'interrupt', 'withdraw', 'complete'] as const;
+type Action = typeof ACTIONS[number];
+const isAction = (value: unknown): value is Action => ACTIONS.some(action => action === value);
 interface Request { kind: 'request'; id: number; action: Action; text?: string; cwd?: string; activeOnly?: boolean }
 interface Reply { kind: 'reply'; id: number; error?: string; text?: string }
 /** A tool the subagent is running right now, with its streamed output so far. */
 export interface LiveTool { id: string; name: string; args: unknown; output?: unknown; started: number }
-/** What the subagent is doing between finished messages: its streaming reply and running tools. */
-export interface LiveState { state: string; model: string; streaming?: AgentMessage; tools: LiveTool[]; agents?: number }
+/** What the subagent is doing between finished messages: its streaming reply, running tools, and your messages it has not read yet. */
+export interface LiveState { state: string; model: string; streaming?: AgentMessage; tools: LiveTool[]; agents?: number; queued?: string[] }
 /**
  * `from` marks the conversation itself (your messages and the agent's replies); other messages have no `from`.
  * `message` carries the agent's own messages (replies with tool calls, tool results) so the window can draw them with Pi's components.
@@ -30,7 +33,8 @@ const isMessage = (value: unknown): value is AgentMessage => record(value) && (v
 const isLive = (value: unknown): value is LiveState => record(value) && typeof value.state === 'string' && typeof value.model === 'string'
   && (value.streaming === undefined || isMessage(value.streaming))
   && Array.isArray(value.tools) && value.tools.every(t => record(t) && typeof t.id === 'string' && typeof t.name === 'string' && typeof t.started === 'number')
-  && (value.agents === undefined || typeof value.agents === 'number');
+  && (value.agents === undefined || typeof value.agents === 'number')
+  && (value.queued === undefined || Array.isArray(value.queued) && value.queued.every(text => typeof text === 'string'));
 function parse(value: unknown): Frame {
   if (!record(value)) throw new Error('Invalid window message');
   const name = value.name, action = value.action, from = value.from;
@@ -41,7 +45,7 @@ function parse(value: unknown): Frame {
   if (typeof value.id !== 'number' || !Number.isSafeInteger(value.id)) throw new Error('Invalid request ID');
   if (value.kind === 'reply' && (value.error === undefined || typeof value.error === 'string') && (value.text === undefined || typeof value.text === 'string'))
     return { kind: 'reply', id: value.id, error: value.error, text: value.text };
-  if (value.kind === 'request' && (action === 'list-agents' || action === 'attach' || action === 'start' || action === 'say' || action === 'tell-main' || action === 'answer' || action === 'complete')
+  if (value.kind === 'request' && isAction(action)
     && (value.text === undefined || typeof value.text === 'string') && (value.cwd === undefined || typeof value.cwd === 'string')
     && (value.activeOnly === undefined || typeof value.activeOnly === 'boolean'))
     return { kind: 'request', id: value.id, action, text: value.text, cwd: value.cwd, activeOnly: value.activeOnly as boolean | undefined };
@@ -100,7 +104,6 @@ export async function serveWindows(directory: string, children: Children, availa
     connections.add(socket);
     let child: string | undefined, attached = false, cursor = 0, firstUser = true, lastStatus = '', ending = false;
     let finalMessages: AgentMessage[] | undefined;
-    const said = new Set<string>(); // Main-agent guidance and child reports reach the session as user messages too.
     const controller = new AbortController();
     let queue = Promise.resolve();
     const track = (promise: Promise<void>) => { work.add(promise); void promise.finally(() => work.delete(promise)).catch(() => {}); };
@@ -127,13 +130,11 @@ export async function serveWindows(directory: string, children: Children, availa
               throw new Error(`Subagent ${id} is no longer available in the menu. Refresh and choose a live agent.`);
             const live = children.live(id);
             const messages = children.retained(id);
-            said.add(info.task.trim());
             // This socket borrows the existing session, never its lifetime, slot or report destination.
             // Other views (the main window's Agents page, other terminals) stay open alongside it.
             attached = true; child = id; finalMessages = live ? undefined : messages;
-            for (const guidance of info.guidance) if (guidance.from === 'user') said.add(guidance.text.trim());
             send({ kind: 'event', name: 'started', text: child, transcript: trustedTranscript(children.history.records.get(child)?.sessionFile, join(directory, 'runs')) ?? undefined });
-            drainMessages(messages, info.task);
+            drainMessages(messages, info);
           } else if (frame.action === 'start') {
             if (child) throw new Error('This window already has a conversation');
             if (!available()) throw new Error('Profile is importing or shutting down; try again when it is ready');
@@ -149,16 +150,25 @@ export async function serveWindows(directory: string, children: Children, availa
               if (text.length > ANSWER_LIMIT) throw new Error(`The reply is over ${ANSWER_LIMIT.toLocaleString('en')} characters; the original Pi window has it in full`);
               send({ kind: 'reply', id: frame.id, text }); return;
             }
+            // Esc and Alt+Up in the window, as agent-view.ts does them in the main one.
+            if (frame.action === 'interrupt') {
+              // Reply once the abort has started, not when it ends, so a tool that ignores it can't hold up this window.
+              // interrupt() throws before it starts the abort, so a refusal is already settled and wins the race.
+              const interrupting = children.interrupt(child);
+              track(interrupting.then(() => {}));
+              send({ kind: 'reply', id: frame.id, text: await Promise.race([interrupting, undefined]) }); return;
+            }
+            if (frame.action === 'withdraw') { send({ kind: 'reply', id: frame.id, text: children.withdraw(child) }); return; }
             if (frame.action === 'complete') {
               const live = children.live(child);
-              if (live) drainMessages(children.retained(child), live.info.task);
+              if (live) drainMessages(children.retained(child), live.info);
               ending = true;
               if (!attached) track(children.finish(child, 'complete').then(() => {}));
               send({ kind: 'event', name: 'finished', text: attached ? 'Detached. The background agent remains with its original parent.'
                 : 'Conversation ended by you. The original window is stopping remaining work and preparing the handoff.' });
             } else {
               if (!frame.text?.trim()) throw new Error('Message is empty');
-              if (frame.action === 'say') { said.add(frame.text.trim()); await children.tell(child, frame.text, 'user'); }
+              if (frame.action === 'say') await children.tell(child, frame.text, 'user');
               else await report(`[${child}] User message from connected window: ${frame.text}`);
             }
           }
@@ -167,8 +177,11 @@ export async function serveWindows(directory: string, children: Children, availa
       });
       track(queue);
     });
-    const drainMessages = (messages: AgentMessage[], task: string) => {
-      const displayable = messages.filter(message => message.role === 'user' || message.role === 'assistant' || message.role === 'toolResult');
+    /** Main-agent guidance and child reports reach the session as user messages too; only what the user sent, from any view, shows as theirs. */
+    const drainMessages = (messages: AgentMessage[], info: RunInfo) => {
+      // The window's handoff, written once the conversation ended, is for the main agent: the window shows the conversation only.
+      const end = info.handoff ? messages.findIndex(message => message.role === 'user' && textContent(message.content).startsWith(HANDOFF_REQUEST)) : -1;
+      const displayable = (end < 0 ? messages : messages.slice(0, end)).filter(message => message.role === 'user' || message.role === 'assistant' || message.role === 'toolResult');
       // An attachment may replay hours of tool output. Pace the history instead of overflowing the bounded wire
       // or starving the owner's event loop. The next status tick continues from the same cursor, which stays valid because
       // retained messages are only ever appended (unlike Pi's projection, which compaction and retries replace).
@@ -177,8 +190,14 @@ export async function serveWindows(directory: string, children: Children, availa
         if (batch++ >= 32 || socket.writableLength > 1_000_000) return false;
         const message = displayable[cursor++];
         let text = message.role === 'toolResult' ? '' : textContent(message.content);
-        if (message.role === 'user' && firstUser) { text = task; firstUser = false; said.add(task.trim()); }
-        if (message.role === 'user') { if (text) send({ kind: 'event', name: 'message', from: said.has(text.trim()) ? 'user' : undefined, text: shorten(text, 200_000) }); continue; }
+        const task = message.role === 'user' && firstUser;
+        if (task) { text = info.task; firstUser = false; }
+        if (message.role === 'user') {
+          // The task, and an interrupt, which continues with your queued messages, are yours too.
+          const yours = task || text.startsWith(INTERRUPTED) || info.guidance.some(g => g.from === 'user' && g.text === text.trim());
+          if (text) send({ kind: 'event', name: 'message', from: yours ? 'user' : undefined, text: shorten(text, 200_000) });
+          continue;
+        }
         const clipped = clip(message);
         if (fits(clipped)) send({ kind: 'event', name: 'message', from: message.role === 'assistant' ? 'agent' : undefined, text: shorten(text, 200_000), message: clipped });
         else if (text) send({ kind: 'event', name: 'message', from: 'agent', text: shorten(text, 200_000) });
@@ -194,19 +213,22 @@ export async function serveWindows(directory: string, children: Children, availa
         send({ kind: 'event', name: 'finished', text: 'This conversation was deleted from the Agents page.' });
         return;
       }
-      if (live) drainMessages(children.retained(child), info.task);
-      const preview = live?.streaming && 'content' in live.streaming ? textContent(live.streaming.content).slice(-2000) : '';
-      const text = `${info.state === 'waiting' ? 'Awaiting user or child reports' : info.state} · ${info.model}\n${live ? [...live.tools.values()].map(t => t.name).join(', ') : ''}\n${preview}`;
+      if (live) drainMessages(children.retained(child), info);
+      // Once the conversation has ended, what its session still streams is the handoff, which is for the main agent.
+      const working = info.handoff ? undefined : live;
+      const preview = working?.streaming && 'content' in working.streaming ? textContent(working.streaming.content).slice(-2000) : '';
+      const text = `${info.state === 'waiting' ? 'Awaiting user or child reports' : info.state} · ${info.model}\n${working ? [...working.tools.values()].map(t => t.name).join(', ') : ''}\n${preview}`;
       let state: LiveState = { state: info.state, model: info.model,
-        streaming: live?.streaming?.role === 'assistant' ? clip(live.streaming) : undefined,
-        tools: live ? [...live.tools].map(([id, t]) => ({ id, name: t.name, args: t.args, output: clipOutput(t.output), started: t.started })) : [],
+        streaming: working?.streaming?.role === 'assistant' ? clip(working.streaming) : undefined,
+        tools: working ? [...working.tools].map(([id, t]) => ({ id, name: t.name, args: t.args, output: clipOutput(t.output), started: t.started })) : [],
         // A finished child counts until its report has reached this agent, so the agent never looks idle in between.
-        agents: [...children.history.records.values()].filter(run => run.parentId === child && (isActiveRun(run) || children.live(run.id))).length };
+        agents: [...children.history.records.values()].filter(run => run.parentId === child && (isActiveRun(run) || children.live(run.id))).length,
+        queued: info.guidance.flatMap(g => g.state === 'queued' && g.from === 'user' ? [g.text.slice(0, 1000)] : []) };
       if (!fits(state)) state = { ...state, streaming: undefined, tools: state.tools.map(t => ({ ...t, args: {}, output: undefined })) };
       const status = JSON.stringify(state);
       if (status !== lastStatus) { lastStatus = status; send({ kind: 'event', name: 'status', text, live: state }); }
       if (!live && (attached && !isActiveRun(info) || info.handoff?.delivered)) {
-        try { if (!drainMessages(finalMessages ??= children.retained(child), info.task)) return; }
+        try { if (!drainMessages(finalMessages ??= children.retained(child), info)) return; }
         catch (error) { send({ kind: 'event', name: 'message', text: `Could not read the final transcript: ${errorText(error)}` }); }
         ending = true;
         send({ kind: 'event', name: 'finished', text: attached ? `Agent ${child} is ${info.state}. Its report goes to its original parent; /complete closes only this view.` : info.handoff?.text ?? 'Conversation ended.' });
