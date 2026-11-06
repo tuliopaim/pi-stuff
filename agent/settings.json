@@ -17,10 +17,12 @@
       "source": "npm:@plannotator/pi-extension",
       "skills": []
     },
-    "git:github.com/DietrichGebert/ponytail"
+    "git:github.com/DietrichGebert/ponytail",
+    "npm:pi-context-bar@0.1.0"
   ],
   "extensions": [
-    "~/dotfiles/pi/agent/extensions"
+    "~/dotfiles/pi/agent/extensions",
+    "!~/dotfiles/pi/agent/extensions/context-tokens-footer.ts"
   ],
   "prompts": [
     "~/dotfiles/pi/agent/prompts"
