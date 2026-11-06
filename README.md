@@ -184,9 +184,61 @@ PI_TEST_HOST_DIR=/path/to/pi-coding-agent \
   node --test --experimental-strip-types ~/dotfiles/pi/tests/work-guard-host.test.ts
 ```
 
+## Normal OptChat profiles
+
+`pi-opt` and `pi-optw` keep separate agent settings, sessions, credentials and
+OptChat memory under `~/.pi-opt` and `~/.pi-opt-work`. They bypass the normal Pi
+routing wrapper. They do not import normal-profile settings, packages, MCP
+servers, or memory integrations. ai-memory and OptMem remain outside these
+profiles. This policy does not change the T3 launchers.
+
+Both profiles discover `~/dotfiles/pi/agent/extensions` by default, excluding
+`delegation/`, `context-tokens-footer.ts`, and `implement-plan.ts`. This enables
+shared web tools, ask-user, Markdown, Plannotator phone support, selection
+comments, and triple-Esc. Triple-Esc loads before vendored OptChat 0.10.0.
+Plannotator is pinned to 0.28.33 and the context bar to 0.1.1. The OptChat Herdr
+adapter loads when Herdr is installed, without the ordinary session bridge.
+Built-in codemode and tool search are loaded and activated through
+`defaultTools`, including in OptChat children.
+
+On each launch, `scripts/pi-opt-config.py` narrowly updates the isolated resource
+policy. It preserves model and thinking choices, UI settings, unrelated local
+settings and resources, and existing OptChat profile instructions/configuration.
+It writes changed files atomically with mode 0600, leaves unchanged files alone,
+and fails on malformed configuration instead of resetting it. Python 3 is
+required. OptChat children discover the same isolated settings, not the normal
+profile's extension list. Work children also load the direct-Anthropic provider
+guard.
+
+
+
+Offline policy and host checks:
+
+```sh
+python3 ../scripts/tests/pi-opt.test.py
+PI_TEST_HOST_DIR=/path/to/pi-coding-agent \
+  agent/node_modules/.bin/tsx --test tests/optchat-policy-host.test.ts
+```
+
+The host check uses installed UI package caches, which may be older than the
+launcher pins. It checks both profiles' main and child-style SDK discovery,
+active tools, provider guard, and a local fixture MCP server without provider
+calls. It does not exercise interactive UI behavior or live PostgreSQL.
+
+## OptChat keyboard controls
+
+Both `pi-opt` and `pi-optw` load the regular Pi triple-Esc editor. In the main
+conversation editor, press Esc three consecutive times to interrupt, with no more
+than one second between presses. Other input resets the sequence. Autocomplete
+still dismisses with a single Esc. OptChat preserves this custom editor, so use
+F10 for its inspector rather than the default down-arrow bar navigation.
+Connected-agent windows also consult the editor's triple-Esc gate before sending
+an interrupt to the owner. Their terminal listener runs before editor input, so
+loading the editor alone is not enough; keep the vendored connected-window patch.
+
 ## OptChat cache retention
 
-`pi-opt` and `pi-optw` load the local OptChat 0.8.9 source snapshot in
+`pi-opt` and `pi-optw` load the local OptChat 0.10.0 source snapshot in
 `vendor/pi-optchat`. Anthropic cache retention defaults to one hour for main
 and connected conversations, five minutes for delegated agents, summarization,
 and history import. Hits refresh expiry. Longer retention helps pauses, not
@@ -207,6 +259,12 @@ OPTCHAT_CACHE_COMPACTOR=long pi-optw
 `OPTCHAT_CACHE_COMPACTOR`, and `OPTCHAT_CACHE_IMPORT` accept `long`, `short`,
 or `none`. Restart the owner session to reload code or environment settings.
 Connected windows run their requests in the owner process and use its policy.
+OptChat 0.10.0 writes connected handoffs with an extra turn in the window's
+existing session, including after recovery. That turn keeps connected retention
+and usage accounting; a cache hit is not guaranteed. The compactor fallback
+keeps compactor retention. Closing or reloading defers unfinished handoffs.
+The profile now remembers its main model and thinking level unless overridden
+by CLI model, provider, or thinking options.
 The same controls work for `pi-opt` on Anthropic. OpenAI is unaffected by
 these custom Anthropic markers.
 
