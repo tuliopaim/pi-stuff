@@ -58,6 +58,11 @@ class TripleEscapeEditor extends CustomEditor {
     this.interruptChildren = interruptChildren;
   }
 
+  /** Also used by connected-window handlers that intercept input before the editor. */
+  shouldInterrupt() {
+    return this.interruptGate.press();
+  }
+
   override handleInput(data: string) {
     if (!this.appKeybindings.matches(data, "app.interrupt")) {
       this.interruptGate.reset();
@@ -71,7 +76,7 @@ class TripleEscapeEditor extends CustomEditor {
       return;
     }
 
-    if (this.interruptGate.press()) {
+    if (this.shouldInterrupt()) {
       this.interruptChildren();
       super.handleInput(data);
     }
