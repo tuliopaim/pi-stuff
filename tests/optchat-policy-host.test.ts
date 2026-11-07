@@ -153,7 +153,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
         const settingsManager = sdk.SettingsManager.create(cwd, agentDir);
         const loader = new sdk.DefaultResourceLoader({ cwd, agentDir, settingsManager,
           noExtensions: true, noSkills: true, noPromptTemplates: true, noContextFiles: true,
-          additionalExtensionPaths: [join(repo, "pi/work/guard.ts")],
+          additionalExtensionPaths: [join(repo, "private/pi-work/guard.ts")],
         });
         await loader.reload();
         assert.deepEqual(loader.getExtensions().errors, []);

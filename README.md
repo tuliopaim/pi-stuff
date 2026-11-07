@@ -108,7 +108,6 @@ Children use Pi's built-in tools and trust-aware project instructions and skills
 
 This replaces the old `subagent_*` tool family, Markdown agent profiles, session modes, and `/btw`. Old JSON registries and child session files are left untouched, but are not imported into Durable. These compatibility features and executable extension inheritance remain unrestored. `/commit` shows its task immediately, then elapsed time, model, and recent tool activity while it runs. Escape cancels it. Success, failure, and cancellation leave a result in the conversation, including failures during setup. Delegation tool cards show model, time, activity, usage, and expandable task/instructions.
 
-
 ## Interactive questions
 
 The `ask_user` tool asks one question with 2–5 likely answers and a free-form fallback. Arrow keys or number keys select an option; Escape goes back or dismisses it.
@@ -172,7 +171,6 @@ npm test --prefix ~/dotfiles/pi/agent
 npm run test:agents --prefix ~/dotfiles/pi/agent
 npm run typecheck:agents --prefix ~/dotfiles/pi/agent
 npm run typecheck:web-tools --prefix ~/dotfiles/pi/agent
-python3 ~/dotfiles/scripts/tests/piw.test.py
 ```
 
 The host-runtime regressions, including the offline subagent prefix and discovery checks, need Pi 1.4. Set
@@ -181,7 +179,7 @@ before running `npm test`, or run it directly:
 
 ```sh
 PI_TEST_HOST_DIR=/path/to/pi-coding-agent \
-  node --test --experimental-strip-types ~/dotfiles/pi/tests/work-guard-host.test.ts
+  node --test --experimental-strip-types ~/dotfiles/pi/tests/subagent-prefix-host.test.ts
 ```
 
 ## Normal OptChat profiles
@@ -209,8 +207,6 @@ and fails on malformed configuration instead of resetting it. Python 3 is
 required. OptChat children discover the same isolated settings, not the normal
 profile's extension list. Work children also load the direct-Anthropic provider
 guard.
-
-
 
 Offline policy and host checks:
 
